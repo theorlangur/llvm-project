@@ -419,38 +419,63 @@ private:
       int Points;
       size_t PrefixLength;
     };
+    StringRef extOrig = llvm::sys::path::extension(Filename);
+    auto BetterThan = [&](ScoredCandidate &S, ScoredCandidate const &Best){
+      if (!S.Preferred && Best.Preferred)
+        return false;
+      if (S.Preferred == Best.Preferred) {
+        if (S.Points < Best.Points)
+          return false;
+        if (S.Points == Best.Points) {
+          S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
+          if (S.PrefixLength < Best.PrefixLength)
+            return false;
+          // hidden heuristics should at least be deterministic!
+          if (S.PrefixLength == Best.PrefixLength)
+            if (S.Index > Best.Index)
+              return false;
+        }
+      }
+
+      return true;
+    };
     // Choose the best candidate by (preferred, points, prefix length, alpha).
     ScoredCandidate Best = {size_t(-1), false, 0, 0};
+    ScoredCandidate BestExt = {size_t(-1), false, 0, 0};
+
     for (const auto &Candidate : Candidates) {
       ScoredCandidate S;
       S.Index = Candidate.first;
       S.Preferred = PreferredLanguage == types::TY_INVALID ||
                     PreferredLanguage == Types[S.Index];
       S.Points = Candidate.second;
-      if (!S.Preferred && Best.Preferred)
-        continue;
-      if (S.Preferred == Best.Preferred) {
-        if (S.Points < Best.Points)
-          continue;
-        if (S.Points == Best.Points) {
+      if (BetterThan(S, Best))
+      {
+        // PrefixLength was only set above if actually needed for a tiebreak.
+        // But it definitely needs to be set to break ties in the future.
+        S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
+        Best = S;
+      }
+      StringRef sExt = llvm::sys::path::extension(Paths[S.Index].first);
+      if (sExt == extOrig)
+      {
+        if (BetterThan(S, BestExt)) {
+          // PrefixLength was only set above if actually needed for a tiebreak.
+          // But it definitely needs to be set to break ties in the future.
           S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
-          if (S.PrefixLength < Best.PrefixLength)
-            continue;
-          // hidden heuristics should at least be deterministic!
-          if (S.PrefixLength == Best.PrefixLength)
-            if (S.Index > Best.Index)
-              continue;
+          BestExt = S;
         }
       }
-      // PrefixLength was only set above if actually needed for a tiebreak.
-      // But it definitely needs to be set to break ties in the future.
-      S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
-      Best = S;
     }
     // Edge case: no candidate got any points.
     // We ignore PreferredLanguage at this point (not ideal).
     if (Best.Index == size_t(-1))
       return {longestMatch(Filename, Paths).second, 0};
+
+    //prefer with matched extension
+    if (BestExt.Index != size_t(-1))
+      return {BestExt.Index, BestExt.Points};
+
     return {Best.Index, Best.Points};
   }
 
@@ -501,13 +526,25 @@ private:
 class InterpolatingCompilationDatabase : public CompilationDatabase {
 public:
   InterpolatingCompilationDatabase(std::unique_ptr<CompilationDatabase> Inner)
-      : Inner(std::move(Inner)), Index(this->Inner->getAllFiles()) {}
+      : Inner(std::move(Inner)), Index(this->Inner->getAllFilesWithDeps()) {}
 
   std::vector<CompileCommand>
   getCompileCommands(StringRef Filename) const override {
     auto Known = Inner->getCompileCommands(Filename);
     if (Index.empty() || !Known.empty())
+    {
+      for(CompileCommand &cc : Known)
+      {
+        if (cc.DependencyIndex >= 0)
+        {
+          CompileCommand trans = TransferableCommand(cc).transferTo(Filename);
+          trans.ApplyDependency(cc.Dependencies[cc.DependencyIndex]);
+          cc = trans;
+          llvm::errs() << "Found dependency to apply for " << Filename << ". (Dep: " << cc.Dependencies[cc.DependencyIndex].Filename << ") ";
+        }
+      }
       return Known;
+    }
     bool TypeCertain;
     auto Lang = guessType(Filename, &TypeCertain);
     if (!TypeCertain)
@@ -516,11 +553,24 @@ public:
         Inner->getCompileCommands(Index.chooseProxy(Filename, foldType(Lang)));
     if (ProxyCommands.empty())
       return {};
-    return {transferCompileCommand(std::move(ProxyCommands.front()), Filename)};
+
+    CompileCommand &proxy = ProxyCommands[0];
+    CompileCommand trans = TransferableCommand(proxy).transferTo(Filename);
+    if (proxy.DependencyIndex >= 0)
+    {
+      trans.ApplyDependency(proxy.Dependencies[proxy.DependencyIndex]);
+      llvm::errs() << "Found dependency to apply for proxy " << Filename << ". (Dep: " << proxy.Dependencies[proxy.DependencyIndex].Filename << ") ";
+    }
+
+    return {trans};
   }
 
   std::vector<std::string> getAllFiles() const override {
     return Inner->getAllFiles();
+  }
+
+  std::vector<std::string> getAllFilesWithDeps() const override {
+    return Inner->getAllFilesWithDeps();
   }
 
   std::vector<CompileCommand> getAllCompileCommands() const override {
