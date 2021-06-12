@@ -1373,6 +1373,7 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   // This is on-by-default in windows to allow parsing SDK headers; we're only
   // disabling it for the main-file (not preamble).
   CI->getLangOpts().DelayedTemplateParsing = false;
+  CI->getPreprocessorOpts().addMacroDef("_CLANGD_CODE_COMPLETE_");
   // Setup code completion.
   FrontendOpts.CodeCompleteOpts = Options;
   FrontendOpts.CodeCompletionAt.FileName = std::string(Input.FileName);
@@ -2299,7 +2300,7 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
   Options.IncludeMacros = false;
   Options.IncludeCodePatterns = false;
   Options.IncludeBriefComments = false;
-  llvm::Optional<PreamblePatch> Patch = /*PCH ? llvm::None :*/ llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
+  llvm::Optional<PreamblePatch> Patch = Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
   semaCodeComplete(
       std::make_unique<SignatureHelpCollector>(Options, DocumentationFormat,
                                                ParseInput.Index, Result),
