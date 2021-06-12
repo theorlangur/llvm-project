@@ -717,6 +717,7 @@ private:
   /// Callback to create processing contexts for tasks.
   const std::function<Context(llvm::StringRef)> ContextProvider;
   const GlobalCompilationDatabase &CDB;
+  public:
   const PCHManager *PCHMgr;
   /// Callback invoked when preamble or main file AST is built.
   ParsingCallbacks &Callbacks;
@@ -917,6 +918,7 @@ void ASTWorker::update(ParseInputs Inputs, WantDiagnostics WantDiags,
     std::vector<Diag> CompilerInvocationDiags =
         CompilerInvocationDiagConsumer.take();
     
+      /*
     PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->tryFindPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
     if (PCH)
     {
@@ -928,6 +930,7 @@ void ASTWorker::update(ParseInputs Inputs, WantDiagnostics WantDiags,
       generateDiagnostics(std::move(Invocation), std::move(Inputs), std::move(CompilerInvocationDiags));
       return;
     }
+      */
 
     if (!Invocation) {
       elog("Could not build CompilerInvocation for file {0}", FileName);
@@ -1104,7 +1107,7 @@ void PreambleThread::build(Request Req) {
           const CanonicalIncludes &CanonIncludes) {
         Callbacks.onPreambleAST(FileName, Inputs.Version, *Req.CI, Ctx, PP,
                                 CanonIncludes);
-      },
+      }, ASTPeer.PCHMgr,
       &Stats);
   if (!LatestBuild)
     return;

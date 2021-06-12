@@ -506,6 +506,8 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   PreprocessorOpts.PrecompiledPreambleBytes.second = false;
   PreprocessorOpts.DisablePCHOrModuleValidation =
       DisableValidationForModuleKind::PCH;
+  PreprocessorOpts.WriteCommentListToPCH = false;
+  //PreprocessorOpts.GeneratePreamble = true;
 
   auto VFS = TFS.view(Item.CompileCommand.Directory);
   if (FS) {
@@ -535,7 +537,8 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   FrontendOptions &FrontendOpts = Invocation->getFrontendOpts();
   FrontendOpts.ProgramAction = frontend::GeneratePCH;
-  FrontendOpts.OutputFile = "__in__memory___";
+  FrontendOpts.SkipFunctionBodies = true;
+  //FrontendOpts.OutputFile = "__in__memory___";
 
   std::vector<std::unique_ptr<FeatureModule::ASTListener>> ASTListeners;
   if (Inputs.FeatureModules) {
@@ -631,8 +634,8 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   Item.Includes = SerializedDeclsCollector.takeIncludes();
   Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
   S = PCHItem::State::Valid;
-  log("(PCH)Successfully generated precompiled header of size: {0}",
-      Item.PCHData.size());
+  log("(PCH)Successfully generated precompiled header of size: {0} (file: {1})",
+      Item.PCHData.size(), Item.CompileCommand.Filename);
 }
 
 void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
@@ -677,6 +680,11 @@ PCHManager::tryFindPCH(clang::clangd::PathRef PCHFile) const {
 PCHManager::PCHAccess
 PCHManager::findPCH(tooling::CompileCommand const &Cmd) const {
   // return {};
+  /*if (llvm::StringRef(Cmd.Filename).endswith(".h"))
+  {
+    log("(findPCH) turned off for headers. {0}", Cmd.Filename);
+    return {};
+  }*/
   llvm::StringRef Dep = findPCHDependency(Cmd);
   if (!Dep.empty())
     return findPCH(Dep);
