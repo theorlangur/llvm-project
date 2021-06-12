@@ -58,6 +58,33 @@ using namespace tooling;
 
 LLVM_INSTANTIATE_REGISTRY(CompilationDatabasePluginRegistry)
 
+void CompileCommand::ApplyDependency(const Dependency &d)
+{
+  for (const std::string &arg : d.RemoveArgs) {
+    const char *pArg = arg.c_str();
+    int skip = 0;
+    //llvm::errs() << "JSON DB: attempting to remove " << arg << "\n";
+    if (pArg[0] >= '0' && pArg[0] <= '9' && pArg[1] == ':') {
+      skip = pArg[0] - '0';
+      pArg += 2;
+    }
+    //llvm::errs() << "JSON DB: 2 attempting to remove:" << pArg << ";skipping "
+                 //<< skip << "\n";
+    auto it = std::find_if(CommandLine.begin(), CommandLine.end(),
+                           [&](const std::string &xarg) {
+                             return strstr(xarg.c_str(), pArg) == xarg.c_str();
+                           });
+    if (it != CommandLine.end()) {
+      //llvm::errs() << "JSON DB: removing found option " << arg
+                   //<< " and skipping " << skip << "\n";
+      CommandLine.erase(it, it + skip + 1);
+    }
+  }
+  if (!d.AddArgs.empty())
+    CommandLine.insert(CommandLine.end(), d.AddArgs.begin(),
+                           d.AddArgs.end());
+}
+
 CompilationDatabase::~CompilationDatabase() = default;
 
 std::unique_ptr<CompilationDatabase>
