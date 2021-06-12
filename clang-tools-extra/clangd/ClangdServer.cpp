@@ -16,6 +16,7 @@
 #include "HeaderSourceSwitch.h"
 #include "Headers.h"
 #include "InlayHints.h"
+#include "PCHManager.h"
 #include "ParsedAST.h"
 #include "Preamble.h"
 #include "Protocol.h"
@@ -24,6 +25,7 @@
 #include "SourceCode.h"
 #include "TUScheduler.h"
 #include "XRefs.h"
+#include "index/Background.h"
 #include "index/CanonicalIncludes.h"
 #include "index/FileIndex.h"
 #include "index/Merge.h"
@@ -160,12 +162,27 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
       Transient(Opts.ImplicitCancellation ? TUScheduler::InvalidateOnUpdate
                                           : TUScheduler::NoInvalidation),
       DirtyFS(std::make_unique<DraftStoreFS>(TFS, DraftMgr)) {
+
+  std::unique_ptr<ParsingCallbacks> ParseCB = std::make_unique<UpdateIndexCallbacks>(DynamicIdx.get(), Callbacks);
+  PCHManager::Options PCHOpts;
+  PCHOpts.OnProgress = [Callbacks](PCHManager::Stats S) {
+    if (Callbacks)
+    {
+      BackgroundQueue::Stats T;
+      T.StatType = BackgroundQueue::Stats::Type::PCH;
+      T.Completed = S.Completed;
+      T.Enqueued = S.Total;
+      Callbacks->onBackgroundIndexProgress(T);
+    }
+  };
+  PrecompiledHeaderMgr = std::make_unique<PCHManager>(CDB, TFS, *ParseCB, PCHOpts);
+
   // Pass a callback into `WorkScheduler` to extract symbols from a newly
   // parsed file and rebuild the file index synchronously each time an AST
   // is parsed.
   WorkScheduler.emplace(
       CDB, TUScheduler::Options(Opts),
-      std::make_unique<UpdateIndexCallbacks>(DynamicIdx.get(), Callbacks));
+      std::move(ParseCB), PrecompiledHeaderMgr.get());
   // Adds an index to the stack, at higher priority than existing indexes.
   auto AddIndex = [&](SymbolIndex *Idx) {
     if (this->Index != nullptr) {
@@ -175,6 +192,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
       this->Index = Idx;
     }
   };
+
   if (Opts.StaticIndex)
     AddIndex(Opts.StaticIndex);
   if (Opts.BackgroundIndex) {
@@ -189,7 +207,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
         TFS, CDB,
         BackgroundIndexStorage::createDiskBackedStorageFactory(
             [&CDB](llvm::StringRef File) { return CDB.getProjectInfo(File); }),
-        std::move(BGOpts));
+        std::move(BGOpts), PrecompiledHeaderMgr.get());
     AddIndex(BackgroundIdx.get());
   }
   if (DynamicIdx)
@@ -223,8 +241,15 @@ ClangdServer::~ClangdServer() {
 void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                llvm::StringRef Version,
                                WantDiagnostics WantDiags, bool ForceRebuild) {
+  bool Existed = DraftMgr.getDraft(File).hasValue();
   std::string ActualVersion = DraftMgr.addDraft(File, Version, Contents);
   ParseOptions Opts;
+
+  if (Existed)
+  {
+    //slow. needs to be done in bulk
+    PrecompiledHeaderMgr->checkChangedFile(File, DraftMgr.asVFS());
+  }
 
   // Compile command is set asynchronously during update, as it can be slow.
   ParseInputs Inputs;
@@ -357,7 +382,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
       return CB(llvm::make_error<CancelledError>(Reason));
 
     llvm::Optional<SpeculativeFuzzyFind> SpecFuzzyFind;
-    if (!IP->Preamble) {
+    if (!IP->Preamble && !IP->PCH) {
       // No speculation in Fallback mode, as it's supposed to be much faster
       // without compiling.
       vlog("Build for file {0} is not ready. Enter fallback mode.", File);
@@ -376,7 +401,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
     // FIXME(ibiryukov): even if Preamble is non-null, we may want to check
     // both the old and the new version in case only one of them matches.
     CodeCompleteResult Result = clangd::codeComplete(
-        File, Pos, IP->Preamble, ParseInput, CodeCompleteOpts,
+        File, Pos, IP->Preamble, ParseInput, std::move(IP->PCH), CodeCompleteOpts,
         SpecFuzzyFind ? SpecFuzzyFind.getPointer() : nullptr);
     {
       clang::clangd::trace::Span Tracer("Completion results callback");
@@ -411,12 +436,12 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
       return CB(IP.takeError());
 
     const auto *PreambleData = IP->Preamble;
-    if (!PreambleData)
+    if (!PreambleData && !IP->PCH)
       return CB(error("Failed to parse includes"));
 
     ParseInputs ParseInput{IP->Command, &TFS, IP->Contents.str()};
     ParseInput.Index = Index;
-    CB(clangd::signatureHelp(File, Pos, *PreambleData, ParseInput));
+    CB(clangd::signatureHelp(File, Pos, PreambleData, ParseInput, std::move(IP->PCH)));
   };
 
   // Unlike code completion, we wait for a preamble here.

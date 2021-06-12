@@ -24,6 +24,7 @@
 #include "Compiler.h"
 #include "Diagnostics.h"
 #include "Headers.h"
+#include "PCHManager.h"
 #include "Preamble.h"
 #include "index/CanonicalIncludes.h"
 #include "support/Path.h"
@@ -55,7 +56,7 @@ public:
   build(llvm::StringRef Filename, const ParseInputs &Inputs,
         std::unique_ptr<clang::CompilerInvocation> CI,
         llvm::ArrayRef<Diag> CompilerInvocationDiags,
-        std::shared_ptr<const PreambleData> Preamble);
+        std::shared_ptr<const PreambleData> Preamble, PCHManager::PCHAccess *PCHAccess);
 
   ParsedAST(ParsedAST &&Other);
   ParsedAST &operator=(ParsedAST &&Other);
