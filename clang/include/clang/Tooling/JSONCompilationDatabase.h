@@ -88,11 +88,15 @@ public:
   /// These are the 'file' entries of the JSON objects.
   std::vector<std::string> getAllFiles() const override;
 
+  std::vector<std::string> getAllPCHFiles() const override;
+
   /// Returns all compile commands for all the files in the compilation
   /// database.
   std::vector<CompileCommand> getAllCompileCommands() const override;
 
-  virtual std::vector<std::string> getAllFilesWithDeps() const override;
+  std::vector<CompileCommand> getAllPCHCompileCommands() const override;
+
+  std::vector<std::string> getAllFilesWithDeps() const override;
 private:
   /// Constructs a JSON compilation database on a memory buffer.
   JSONCompilationDatabase(std::unique_ptr<llvm::MemoryBuffer> Database,
@@ -122,19 +126,24 @@ private:
   /// Converts the given array of CompileCommandRefs to CompileCommands.
   void getCommands(ArrayRef<CompileCommandRef> CommandsRef,
                    std::vector<CompileCommand> &Commands) const;
+
+  bool isPCHCommand(CompileCommandRef const& cmd) const;
   
   void inferFromDependent(StringRef FilePath, std::vector<CompileCommand> &Commands) const;
 
   // Maps file paths to the compile command lines for that file.
   llvm::StringMap<std::vector<CompileCommandRef>> IndexByFile;
   llvm::StringMap<std::vector<CompileCommandRef>> IndexByFileDep;
+  llvm::StringMap<std::vector<CompileCommandRef>> IndexByPCH;
 
   /// All the compile commands in the order that they were provided in the
   /// JSON stream.
   std::vector<CompileCommandRef> AllCommands;
+  std::vector<CompileCommandRef> PCHCommands;
 
   FileMatchTrie MatchTrie;
   FileMatchTrie MatchTrieDep;
+  FileMatchTrie MatchTriePCH;
 
   std::unique_ptr<llvm::MemoryBuffer> Database;
   JSONCommandLineSyntax Syntax;
