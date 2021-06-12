@@ -34,6 +34,10 @@ public:
     return Base->getAllFiles();
   }
 
+  std::vector<std::string> getAllFilesWithDeps() const override {
+    return Base->getAllFilesWithDeps();
+  }
+
   std::vector<CompileCommand>
   getCompileCommands(StringRef FilePath) const override {
     return expand(Base->getCompileCommands(FilePath));
