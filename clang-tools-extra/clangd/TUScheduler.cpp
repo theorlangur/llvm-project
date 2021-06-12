@@ -914,7 +914,6 @@ void ASTWorker::update(ParseInputs Inputs, WantDiagnostics WantDiags,
     std::vector<Diag> CompilerInvocationDiags =
         CompilerInvocationDiagConsumer.take();
     
-      /*
     PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->tryFindPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
     if (PCH)
     {
@@ -926,7 +925,6 @@ void ASTWorker::update(ParseInputs Inputs, WantDiagnostics WantDiags,
       generateDiagnostics(std::move(Invocation), std::move(Inputs), std::move(CompilerInvocationDiags));
       return;
     }
-      */
 
     if (!Invocation) {
       elog("Could not build CompilerInvocation for file {0}", FileName);
