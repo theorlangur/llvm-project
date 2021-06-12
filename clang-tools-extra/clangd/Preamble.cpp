@@ -590,7 +590,7 @@ public:
 std::shared_ptr<const PreambleData>
 buildPreamble(PathRef FileName, CompilerInvocation CI,
               const ParseInputs &Inputs, bool StoreInMemory,
-              PreambleParsedCallback PreambleCallback,
+              PreambleParsedCallback PreambleCallback, const PCHManager *PCHMgr/* = nullptr*/,
               PreambleBuildStats *Stats) {
   // Note that we don't need to copy the input contents, preamble can live
   // without those.
@@ -654,7 +654,15 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
   auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
   llvm::SmallString<32> AbsFileName(FileName);
   VFS->makeAbsolute(AbsFileName);
-  auto StatCache = std::make_shared<PreambleFileStatusCache>(AbsFileName);
+
+  PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->findPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
+  if (PCH)
+  {
+    log("Applying PCH {0} to build preamble for {1}", PCH.filename(), FileName);
+    PCH.addPCH(&CI, VFS);
+  }
+
+  auto StatCache = std::make_unique<PreambleFileStatusCache>(AbsFileName);
   auto StatCacheFS = StatCache->getProducingFS(VFS);
   llvm::IntrusiveRefCntPtr<TimerFS> TimedFS(new TimerFS(StatCacheFS));
 
