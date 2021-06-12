@@ -63,6 +63,7 @@ struct CompileCommand {
                  std::vector<Dependency> Dependencies)
       : CompileCommand(Directory, Filename, std::move(CommandLine), Output) { this->Dependencies = std::move(Dependencies); }
 
+  void RemoveDepArgs(const Dependency &d);
   void ApplyDependency(const Dependency &d);
 
   /// The working directory the command was executed from.
