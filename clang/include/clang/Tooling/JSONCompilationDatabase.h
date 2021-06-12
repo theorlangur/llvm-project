@@ -92,6 +92,7 @@ public:
   /// database.
   std::vector<CompileCommand> getAllCompileCommands() const override;
 
+  virtual std::vector<std::string> getAllFilesWithDeps() const override;
 private:
   /// Constructs a JSON compilation database on a memory buffer.
   JSONCompilationDatabase(std::unique_ptr<llvm::MemoryBuffer> Database,
@@ -105,6 +106,7 @@ private:
   /// failed.
   bool parse(std::string &ErrorMessage);
 
+  using DepsShared = std::shared_ptr<std::vector<CompileCommand::Dependency>>;
   // Tuple (directory, filename, commandline, output) where 'commandline'
   // points to the corresponding scalar nodes in the YAML stream.
   // If the command line contains a single argument, it is a shell-escaped
@@ -115,20 +117,24 @@ private:
   using CompileCommandRef =
       std::tuple<llvm::yaml::ScalarNode *, llvm::yaml::ScalarNode *,
                  std::vector<llvm::yaml::ScalarNode *>,
-                 llvm::yaml::ScalarNode *>;
+                 llvm::yaml::ScalarNode *, DepsShared>;
 
   /// Converts the given array of CompileCommandRefs to CompileCommands.
   void getCommands(ArrayRef<CompileCommandRef> CommandsRef,
                    std::vector<CompileCommand> &Commands) const;
+  
+  void inferFromDependent(StringRef FilePath, std::vector<CompileCommand> &Commands) const;
 
   // Maps file paths to the compile command lines for that file.
   llvm::StringMap<std::vector<CompileCommandRef>> IndexByFile;
+  llvm::StringMap<std::vector<CompileCommandRef>> IndexByFileDep;
 
   /// All the compile commands in the order that they were provided in the
   /// JSON stream.
   std::vector<CompileCommandRef> AllCommands;
 
   FileMatchTrie MatchTrie;
+  FileMatchTrie MatchTrieDep;
 
   std::unique_ptr<llvm::MemoryBuffer> Database;
   JSONCommandLineSyntax Syntax;
