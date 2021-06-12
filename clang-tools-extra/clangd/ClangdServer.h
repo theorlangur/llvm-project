@@ -17,6 +17,7 @@
 #include "GlobalCompilationDatabase.h"
 #include "Hover.h"
 #include "ModulesBuilder.h"
+#include "PCHManager.h"
 #include "Protocol.h"
 #include "SemanticHighlighting.h"
 #include "TUScheduler.h"
@@ -483,6 +484,8 @@ private:
   std::vector<std::unique_ptr<SymbolIndex>> MergedIdx;
   // Manage module files.
   ModulesBuilder *ModulesManager = nullptr;
+  // If present, an index of symbols in open files. Read via *Index.
+  std::unique_ptr<PCHManager> PrecompiledHeaderMgr;
 
   // When set, provides clang-tidy options for a specific file.
   TidyProviderRef ClangTidyProvider;

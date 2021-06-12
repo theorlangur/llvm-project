@@ -68,7 +68,8 @@ BackgroundIndexLoader::loadShard(PathRef StartSourceFile, PathRef DependentTU) {
   for (const auto &It : *LS.Shard->Sources) {
     auto AbsPath = URI::resolve(It.getKey(), StartSourceFile);
     if (!AbsPath) {
-      elog("Failed to resolve URI: {0}", AbsPath.takeError());
+      if (!It.getKey().empty())
+        elog("Failed to resolve URI: {0}", AbsPath.takeError());
       continue;
     }
     // A shard contains only edges for non main-file sources.

@@ -100,6 +100,8 @@ add_clang_library(clangDaemon
   ModulesBuilder.cpp
   PathMapping.cpp
   Protocol.cpp
+  PCHManager.cpp
+  PCHManagerQueue.cpp
   Quality.cpp
   ParsedAST.cpp
   Preamble.cpp

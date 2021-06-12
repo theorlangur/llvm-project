@@ -10,6 +10,7 @@
 #define LLVM_CLANG_TOOLS_EXTRA_CLANGD_INDEX_BACKGROUND_H
 
 #include "GlobalCompilationDatabase.h"
+#include "PCHManager.h"
 #include "SourceCode.h"
 #include "index/BackgroundRebuild.h"
 #include "index/FileIndex.h"
@@ -88,6 +89,7 @@ public:
     unsigned Active = 0;    // Tasks being currently processed by a worker.
     unsigned Completed = 0; // Tasks that have been finished.
     unsigned LastIdle = 0;  // Number of completed tasks when last empty.
+    enum class Type {Back, PCH} StatType = Type::Back;
   };
 
   BackgroundQueue(std::function<void(Stats)> OnProgress = nullptr)
@@ -151,7 +153,7 @@ public:
   /// The current Context will be propagated to each worker thread.
   BackgroundIndex(const ThreadsafeFS &, const GlobalCompilationDatabase &CDB,
                   BackgroundIndexStorage::Factory IndexStorageFactory,
-                  Options Opts);
+                  Options Opts, const PCHManager *PCHMgr = nullptr);
   ~BackgroundIndex(); // Blocks while the current task finishes.
 
   // Enqueue translation units for indexing.
@@ -197,6 +199,7 @@ private:
   // configuration
   const ThreadsafeFS &TFS;
   const GlobalCompilationDatabase &CDB;
+  const PCHManager *PCHMgr;
   llvm::ThreadPriority IndexingPriority;
   std::function<Context(PathRef)> ContextProvider;
 

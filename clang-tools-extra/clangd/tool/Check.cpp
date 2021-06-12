@@ -260,7 +260,7 @@ public:
 
     log("Building AST...");
     AST = ParsedAST::build(File, Inputs, std::move(Invocation),
-                           /*InvocationDiags=*/std::vector<Diag>{}, Preamble);
+                           /*InvocationDiags=*/std::vector<Diag>{}, Preamble, nullptr);
     if (!AST) {
       elog("Failed to build AST");
       return false;

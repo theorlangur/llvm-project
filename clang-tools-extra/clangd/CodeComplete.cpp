@@ -1322,7 +1322,8 @@ private:
 struct SemaCompleteInput {
   PathRef FileName;
   size_t Offset;
-  const PreambleData &Preamble;
+  PCHManager::PCHAccess PCH;
+  const PreambleData *Preamble;
   const std::optional<PreamblePatch> Patch;
   const ParseInputs &ParseInput;
 };
@@ -1390,23 +1391,29 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   // However, if we're completing *inside* the preamble section of the draft,
   // overriding the preamble will break sema completion. Fortunately we can just
   // skip all includes in this case; these completions are really simple.
-  PreambleBounds PreambleRegion =
-      ComputePreambleBounds(CI->getLangOpts(), *ContentsBuffer, 0);
-  bool CompletingInPreamble = Input.Offset < PreambleRegion.Size ||
+  PreambleBounds PreambleRegion = Input.Preamble ?
+      ComputePreambleBounds(*CI->getLangOpts(), *ContentsBuffer, 0) : PreambleBounds(0, false);
+  bool CompletingInPreamble = Input.Preamble && (Input.Offset < PreambleRegion.Size ||
                               (!PreambleRegion.PreambleEndsAtStartOfLine &&
-                               Input.Offset == PreambleRegion.Size);
+                               Input.Offset == PreambleRegion.Size));
   if (Input.Patch)
     Input.Patch->apply(*CI);
+
   // NOTE: we must call BeginSourceFile after prepareCompilerInstance. Otherwise
   // the remapped buffers do not get freed.
   llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS =
       Input.ParseInput.TFS->view(Input.ParseInput.CompileCommand.Directory);
-  if (Input.Preamble.StatCache)
-    VFS = Input.Preamble.StatCache->getConsumingFS(std::move(VFS));
+  if (Input.Preamble && Input.Preamble->StatCache)
+    VFS = Input.Preamble->StatCache->getConsumingFS(std::move(VFS));
+  if (Input.PCH)
+  {
+    log("Applying PCH for code complete action for {0}. PCH: {1}", Input.FileName, Input.PCH.filename());
+    Input.PCH.addPCH(CI.get(), VFS);
+  }
   auto Clang = prepareCompilerInstance(
-      std::move(CI), !CompletingInPreamble ? &Input.Preamble.Preamble : nullptr,
+      std::move(CI), !CompletingInPreamble && Input.Preamble ? &Input.Preamble->Preamble : nullptr,
       std::move(ContentsBuffer), std::move(VFS), IgnoreDiags);
-  Clang->getPreprocessorOpts().SingleFileParseMode = CompletingInPreamble;
+  Clang->getPreprocessorOpts().SingleFileParseMode = CompletingInPreamble || Input.PCH;
   Clang->setCodeCompletionConsumer(Consumer.release());
 
   SyntaxOnlyAction Action;
@@ -1421,7 +1428,8 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   //  - but Sema code complete won't see them: as part of the preamble, they're
   //    deserialized only when mentioned.
   // Force them to be deserialized so SemaCodeComplete sees them.
-  loadMainFilePreambleMacros(Clang->getPreprocessor(), Input.Preamble);
+  if (Input.Preamble)
+    loadMainFilePreambleMacros(Clang->getPreprocessor(), *Input.Preamble);
   if (Includes)
     Includes->collect(*Clang);
   if (llvm::Error Err = Action.Execute()) {
@@ -2216,6 +2224,7 @@ maybeFunctionArgumentCommentStart(llvm::StringRef Content) {
 CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
                                 const PreambleData *Preamble,
                                 const ParseInputs &ParseInput,
+                                PCHManager::PCHAccess PCH,
                                 CodeCompleteOptions Opts,
                                 SpeculativeFuzzyFind *SpecFuzzyFind) {
   auto Offset = positionToOffset(ParseInput.Contents, Pos);
@@ -2239,10 +2248,10 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
   auto Flow = CodeCompleteFlow(
       FileName, Preamble ? Preamble->Includes : IncludeStructure(),
       SpecFuzzyFind, Opts);
-  return (!Preamble || Opts.RunParser == CodeCompleteOptions::NeverParse)
+  return ((!Preamble && !PCH) || Opts.RunParser == CodeCompleteOptions::NeverParse)
              ? std::move(Flow).runWithoutSema(ParseInput.Contents, *Offset,
                                               *ParseInput.TFS)
-             : std::move(Flow).run({FileName, *Offset, *Preamble,
+             : std::move(Flow).run({FileName, *Offset, std::move(PCH), Preamble,
                                     /*PreamblePatch=*/
                                     PreamblePatch::createMacroPatch(
                                         FileName, ParseInput, *Preamble),
@@ -2250,8 +2259,9 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
 }
 
 SignatureHelp signatureHelp(PathRef FileName, Position Pos,
-                            const PreambleData &Preamble,
+                            const PreambleData *Preamble,
                             const ParseInputs &ParseInput,
+                            PCHManager::PCHAccess PCH,
                             MarkupKind DocumentationFormat) {
   auto Offset = positionToOffset(ParseInput.Contents, Pos);
   if (!Offset) {
@@ -2264,11 +2274,12 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
   Options.IncludeMacros = false;
   Options.IncludeCodePatterns = false;
   Options.IncludeBriefComments = false;
+  llvm::Optional<PreamblePatch> Patch = PCH ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
   semaCodeComplete(
       std::make_unique<SignatureHelpCollector>(Options, DocumentationFormat,
                                                ParseInput.Index, Result),
       Options,
-      {FileName, *Offset, Preamble,
+      {FileName, *Offset, std::move(PCH), Preamble,
        PreamblePatch::createFullPatch(FileName, ParseInput, Preamble),
        ParseInput});
   return Result;

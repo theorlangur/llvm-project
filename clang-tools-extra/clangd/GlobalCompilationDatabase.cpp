@@ -547,6 +547,15 @@ public:
     Thread.join();
   }
 };
+  
+template<class T>
+struct GetPathHelper;
+
+template<>
+struct GetPathHelper<std::string> { static llvm::StringRef val(std::string &I) { return I;} };
+
+template<>
+struct GetPathHelper<tooling::CompileCommand> { static llvm::StringRef val(tooling::CompileCommand &I) { return I.Filename;} };
 
 // The DirBasedCDB associates each file with a specific CDB.
 // When a CDB is discovered, it may claim to describe files that we associate
@@ -661,9 +670,11 @@ public:
          DirectoryBasedGlobalCompilationDatabase &Parent)
       : ThisDir(ThisDir), Parent(Parent) {}
 
-  std::vector<std::string> filter(std::vector<std::string> AllFiles,
+  template<class T>
+  std::vector<T> filter(std::vector<T> AllFiles,
                                   std::atomic<bool> &ShouldStop) {
-    std::vector<std::string> Filtered;
+    std::vector<T> Filtered;
+    using helper = GetPathHelper<T>;
     // Allow for clean early-exit of the slow parts.
     auto ExitEarly = [&] {
       if (ShouldStop.load(std::memory_order_acquire)) {
@@ -682,7 +693,7 @@ public:
       }
       if (ExitEarly()) // loading config may be slow
         return Filtered;
-      WithContext WithProvidedContent(Parent.Opts.ContextProvider(AllFiles[I]));
+      WithContext WithProvidedContent(Parent.Opts.ContextProvider(helper::val(AllFiles[I])));
       const Config::CDBSearchSpec &Spec =
           Config::current().CompileFlags.CDBSearch;
       switch (Spec.Policy) {
@@ -690,7 +701,7 @@ public:
         break;
       case Config::CDBSearchSpec::Ancestors:
         SearchPaths[I].setInt(/*Recursive=*/1);
-        SearchPaths[I].setPointer(addParents(AllFiles[I]));
+        SearchPaths[I].setPointer(addParents(helper::val(AllFiles[I])));
         break;
       case Config::CDBSearchSpec::FixedDir:
         SearchPaths[I].setPointer(&Dirs[*Spec.FixedCDBPath]);
@@ -717,6 +728,12 @@ void DirectoryBasedGlobalCompilationDatabase::BroadcastThread::process(
       Filter(T.PI.SourceRoot, Parent).filter(T.CDB->getAllFiles(), ShouldStop);
   if (!GovernedFiles.empty())
     Parent.OnCommandChanged.broadcast(std::move(GovernedFiles));
+
+  vlog("Broadcasting compilation database (PCH) from {0}", T.PI.SourceRoot);
+  std::vector<tooling::CompileCommand> PCHGovernedFiles =
+      Filter(T.PI.SourceRoot, Parent).filter(T.CDB->getAllPCHCompileCommands(), ShouldStop);
+
+  Parent.OnPCHAnnounce.broadcast(std::move(PCHGovernedFiles));
 }
 
 void DirectoryBasedGlobalCompilationDatabase::broadcastCDB(
@@ -826,9 +843,14 @@ void OverlayCDB::setCompileCommand(PathRef File,
 DelegatingCDB::DelegatingCDB(const GlobalCompilationDatabase *Base)
     : Base(Base) {
   if (Base)
+  {
     BaseChanged = Base->watch([this](const std::vector<std::string> Changes) {
       OnCommandChanged.broadcast(Changes);
     });
+    BasePCHAnnounce = Base->watch([this](const std::vector<tooling::CompileCommand> PCHs) {
+      OnPCHAnnounce.broadcast(PCHs);
+    });
+  }
 }
 
 DelegatingCDB::DelegatingCDB(std::unique_ptr<GlobalCompilationDatabase> Base)

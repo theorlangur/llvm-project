@@ -25,7 +25,7 @@
 #include "llvm/ADT/FunctionExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
-#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Testing/Support/Error.h"
@@ -40,7 +40,6 @@
 #include <mutex>
 #include <optional>
 #include <thread>
-#include <utility>
 
 namespace clang {
 namespace clangd {
@@ -63,6 +62,9 @@ protected:
     // This is needed to we can test index-based operations like call hierarchy.
     Base.BuildDynamicSymbolIndex = true;
     Base.FeatureModules = &FeatureModules;
+    Base.WorkspaceRoot = "/home/orlangur/myapps/cpp/dummy/";
+    Base.ResourceDir = "/home/orlangur/myapps/cpp/cpp_indexer/build/llvm/Debug/lib/clang/13.0.0";
+    //Base.BackgroundIndex = true;
   }
 
   LSPClient &start() {
@@ -88,7 +90,8 @@ protected:
       stop();
   }
 
-  MockFS FS;
+  //MockFS FS;
+  RealThreadsafeFS FS;
   ClangdLSPServer::Options Opts;
   FeatureModuleSet FeatureModules;
 
@@ -157,6 +160,7 @@ TEST_F(LSPTest, Diagnostics) {
   EXPECT_THAT(Client.diagnostics("foo.cpp"), llvm::ValueIs(testing::IsEmpty()));
 }
 
+/*
 TEST_F(LSPTest, DiagnosticsHeaderSaved) {
   auto &Client = start();
   Client.didOpen("foo.cpp", R"cpp(
@@ -185,6 +189,7 @@ TEST_F(LSPTest, DiagnosticsHeaderSaved) {
               llvm::ValueIs(testing::ElementsAre(
                   diagMessage("Use of undeclared identifier 'changed'"))));
 }
+*/
 
 TEST_F(LSPTest, RecordsLatencies) {
   trace::TestTracer Tracer;
@@ -262,6 +267,7 @@ TEST_F(LSPTest, ClangTidyRename) {
   EXPECT_EQ(Params, std::vector{llvm::json::Value(std::move(ExpectedEdit))});
 }
 
+/*
 TEST_F(LSPTest, IncomingCalls) {
   Annotations Code(R"cpp(
     void calle^e(int);
@@ -355,6 +361,7 @@ capture(std::optional<llvm::Expected<T>> &Out) {
   Out.reset();
   return [&Out](llvm::Expected<T> V) { Out.emplace(std::move(V)); };
 }
+*/
 
 TEST_F(LSPTest, FeatureModulesThreadingTest) {
   // A feature module that does its work on a background thread, and so
@@ -472,6 +479,68 @@ TEST_F(LSPTest, DiagModuleTest) {
   Client.didOpen("foo.cpp", "test;");
   EXPECT_THAT(Client.diagnostics("foo.cpp"),
               llvm::ValueIs(testing::ElementsAre(diagMessage(DiagMsg))));
+}
+
+TEST_F(LSPTest, PCHTest) {
+  auto &Client = start();
+  using namespace std::chrono_literals;
+  int fd;
+  const char *pPath = "/home/orlangur/myapps/cpp/dummy/source/db/db2.h";
+  llvm::sys::fs::openFileForRead(pPath, fd);
+  uint64_t sz;
+  llvm::sys::fs::file_size(pPath, sz);
+  std::vector<char> content;
+  content.resize(sz + 1);
+  auto res = llvm::sys::fs::readNativeFile(fd, content).takeError();
+  content[sz] = 0;
+  llvm::sys::fs::closeFile(fd);
+  Client.didOpen(pPath, content.data());
+  std::this_thread::sleep_for(15s);
+  //for(int i = 0; i < 5; ++i)
+  {
+    Client.notify(
+        "textDocument/didChange",
+        llvm::json::Object{
+            {"textDocument",
+             Client.documentID(
+                 pPath, 36)},
+            {"contentChanges", {llvm::json::Object{
+              {"range", llvm::json::Object{
+                {"start", Position{16, 7}},
+                {"end", Position{16, 7}}
+              }},
+              {"rangeLength", 0},
+              {"text", "x"},
+            }}},
+        });
+    std::this_thread::sleep_for(80ms);
+  }
+  {
+    auto &Def = Client.call(
+        "textDocument/completion",
+        llvm::json::Object{
+            {"textDocument",
+             Client.documentID(
+                 pPath)},
+            {"context", llvm::json::Object{{"triggerKind", 1}}},
+            {"position", Position{16, 8}},
+        });
+    std::this_thread::sleep_for(1s);
+  }
+                          /*
+  auto &Def = Client.call("textDocument/hover",
+                          llvm::json::Object{
+                              {"textDocument", Client.documentID("/home/orlangur/myapps/cpp/dummy/source/db/db2.cpp")},
+                              {"position", Position{15,11}},
+                          });
+  auto &Def2 = Client.call("textDocument/declaration",
+                          llvm::json::Object{
+                              {"textDocument", Client.documentID("/home/orlangur/myapps/cpp/dummy/source/db/db2.cpp")},
+                              {"position", Position{15,18}},
+                          });
+                          */
+  std::this_thread::sleep_for(3600s);
+  Client.stop();
 }
 } // namespace
 } // namespace clangd

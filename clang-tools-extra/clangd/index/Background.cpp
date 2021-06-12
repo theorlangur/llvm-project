@@ -10,6 +10,8 @@
 #include "Compiler.h"
 #include "Config.h"
 #include "Headers.h"
+#include "PCHManager.h"
+#include "ParsedAST.h"
 #include "SourceCode.h"
 #include "URI.h"
 #include "index/BackgroundIndexLoader.h"
@@ -92,8 +94,8 @@ bool shardIsStale(const LoadedShard &LS, llvm::vfs::FileSystem *FS) {
 
 BackgroundIndex::BackgroundIndex(
     const ThreadsafeFS &TFS, const GlobalCompilationDatabase &CDB,
-    BackgroundIndexStorage::Factory IndexStorageFactory, Options Opts)
-    : SwapIndex(std::make_unique<MemIndex>()), TFS(TFS), CDB(CDB),
+    BackgroundIndexStorage::Factory IndexStorageFactory, Options Opts, const PCHManager *PCHMgr)
+    : SwapIndex(std::make_unique<MemIndex>()), TFS(TFS), CDB(CDB), PCHMgr(PCHMgr),
       IndexingPriority(Opts.IndexingPriority),
       ContextProvider(std::move(Opts.ContextProvider)),
       IndexedSymbols(IndexContents::All),
@@ -195,7 +197,8 @@ void BackgroundIndex::update(
     const auto &IGN = IndexIt.getValue();
     auto AbsPath = URI::resolve(IGN.URI, MainFile);
     if (!AbsPath) {
-      elog("Failed to resolve URI: {0}", AbsPath.takeError());
+      if (!IGN.URI.empty())
+        elog("Failed to resolve URI: {0}", AbsPath.takeError());
       continue;
     }
     const auto DigestIt = ShardVersionsSnapshot.find(*AbsPath);
@@ -278,6 +281,13 @@ llvm::Error BackgroundIndex::index(tooling::CompileCommand Cmd) {
   auto CI = buildCompilerInvocation(Inputs, IgnoreDiags);
   if (!CI)
     return error("Couldn't build compiler invocation");
+
+  auto PCHAccess = PCHMgr ? PCHMgr->findPCH(Inputs.CompileCommand) : PCHManager::PCHAccess();
+  if (PCHAccess)
+  {
+    log("Indexing {0} applying PCH {1}", Inputs.CompileCommand.Filename, PCHAccess.filename());
+    PCHAccess.addPCH(CI.get(), FS);
+  }
 
   auto Clang =
       prepareCompilerInstance(std::move(CI), /*Preamble=*/nullptr,

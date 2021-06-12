@@ -165,6 +165,15 @@ std::vector<CompileCommand> CompilationDatabase::getAllCompileCommands() const {
   return Result;
 }
 
+std::vector<CompileCommand> CompilationDatabase::getAllPCHCompileCommands() const {
+  std::vector<CompileCommand> Result;
+  for (const auto &File : getAllPCHFiles()) {
+    auto C = getCompileCommands(File);
+    std::move(C.begin(), C.end(), std::back_inserter(Result));
+  }
+  return Result;
+}
+
 CompilationDatabasePlugin::~CompilationDatabasePlugin() = default;
 
 namespace {

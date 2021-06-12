@@ -68,8 +68,16 @@ public:
     return OnCommandChanged.observe(std::move(L));
   }
 
+  using PCHAnnounce = Event<std::vector<tooling::CompileCommand>>;
+
+  PCHAnnounce::Subscription watch(PCHAnnounce::Listener L) const {
+    return OnPCHAnnounce.observe(std::move(L));
+  }
+
+
 protected:
   mutable CommandChanged OnCommandChanged;
+  mutable PCHAnnounce OnPCHAnnounce;
 };
 
 // Helper class for implementing GlobalCompilationDatabases that wrap others.
@@ -94,6 +102,7 @@ private:
   const GlobalCompilationDatabase *Base;
   std::unique_ptr<GlobalCompilationDatabase> BaseOwner;
   CommandChanged::Subscription BaseChanged;
+  PCHAnnounce::Subscription BasePCHAnnounce;
 };
 
 /// Gets compile args from tooling::CompilationDatabases built for parent
