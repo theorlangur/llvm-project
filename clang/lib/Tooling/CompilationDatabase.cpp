@@ -58,7 +58,7 @@ using namespace tooling;
 
 LLVM_INSTANTIATE_REGISTRY(CompilationDatabasePluginRegistry)
 
-void CompileCommand::ApplyDependency(const Dependency &d)
+void CompileCommand::RemoveDepArgs(const Dependency &d)
 {
   for (const std::string &arg : d.RemoveArgs) {
     const char *pArg = arg.c_str();
@@ -80,6 +80,10 @@ void CompileCommand::ApplyDependency(const Dependency &d)
       CommandLine.erase(it, it + skip + 1);
     }
   }
+}
+void CompileCommand::ApplyDependency(const Dependency &d)
+{
+  RemoveDepArgs(d);
   if (!d.AddArgs.empty())
     CommandLine.insert(CommandLine.end(), d.AddArgs.begin(),
                            d.AddArgs.end());
