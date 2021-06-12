@@ -86,6 +86,7 @@ public:
   struct Options {
     /// Cache (large) pch data in RAM rather than temporary files on disk.
     bool StorePCHInMemory = true;
+    bool WaitForInit = true;
     std::function<void(Stats)> OnProgress;
   };
 
@@ -161,6 +162,7 @@ public:
         IncludeStructure Includes;
         CanonicalIncludes CanonIncludes;
         State ItemState = State::Rebuild;
+        int Version = 0;
         mutable std::atomic<unsigned> InUse{0};
         mutable std::condition_variable_any CV;
     };
@@ -180,6 +182,7 @@ public:
     GlobalCompilationDatabase::CommandChanged::Subscription CommandsChanged;
     GlobalCompilationDatabase::PCHAnnounce::Subscription PCHAnnounce;
 
+    bool WaitForInit = true;
     std::atomic<bool> Initialized = {false};
     mutable std::condition_variable_any InitCV;
     PCHItemList PCHs;
