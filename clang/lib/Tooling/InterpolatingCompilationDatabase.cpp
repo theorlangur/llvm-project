@@ -449,14 +449,18 @@ private:
       S.Preferred = PreferredLanguage == types::TY_INVALID ||
                     PreferredLanguage == Types[S.Index];
       S.Points = Candidate.second;
+      StringRef sExt = llvm::sys::path::extension(OriginalPaths[S.Index]);
       if (BetterThan(S, Best))
       {
         // PrefixLength was only set above if actually needed for a tiebreak.
         // But it definitely needs to be set to break ties in the future.
         S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
         Best = S;
+        if (sExt == extOrig)
+        {
+          BestExt = S;
+        }
       }
-      StringRef sExt = llvm::sys::path::extension(Paths[S.Index].first);
       if (sExt == extOrig)
       {
         if (BetterThan(S, BestExt)) {
@@ -467,6 +471,7 @@ private:
         }
       }
     }
+
     // Edge case: no candidate got any points.
     // We ignore PreferredLanguage at this point (not ideal).
     if (Best.Index == size_t(-1))
