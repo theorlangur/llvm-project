@@ -24,6 +24,7 @@
 
 #include "CollectMacros.h"
 #include "Compiler.h"
+#include "PCHManager.h"
 #include "Diagnostics.h"
 #include "FS.h"
 #include "Headers.h"
@@ -156,7 +157,7 @@ struct PreambleBuildStats {
 std::shared_ptr<const PreambleData>
 buildPreamble(PathRef FileName, CompilerInvocation CI,
               const ParseInputs &Inputs, bool StoreInMemory,
-              PreambleParsedCallback PreambleCallback,
+              PreambleParsedCallback PreambleCallback, const PCHManager *PCHMgr = nullptr,
               PreambleBuildStats *Stats = nullptr);
 
 /// Returns true if \p Preamble is reusable for \p Inputs. Note that it will

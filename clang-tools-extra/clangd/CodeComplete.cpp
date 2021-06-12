@@ -1397,8 +1397,16 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   bool CompletingInPreamble = Input.Preamble && (Input.Offset < PreambleRegion.Size ||
                               (!PreambleRegion.PreambleEndsAtStartOfLine &&
                                Input.Offset == PreambleRegion.Size));
+  log("semaCodeComplete: preamble. completing in: {0}; bounds: sz: {1}; ends at start of line: {2}", CompletingInPreamble, PreambleRegion.Size, PreambleRegion.PreambleEndsAtStartOfLine);
+  if (Input.Preamble)
+  {
+    log("semaCodeComplete: preamble size: {0}", Input.Preamble->Preamble.getSize());
+  }
   if (Input.Patch)
+  {
+    log("semaCodeComplete: applying patch");
     Input.Patch->apply(*CI);
+  }
 
   // NOTE: we must call BeginSourceFile after prepareCompilerInstance. Otherwise
   // the remapped buffers do not get freed.
@@ -1410,11 +1418,28 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   {
     log("Applying PCH for code complete action for {0}. PCH: {1}", Input.FileName, Input.PCH.filename());
     Input.PCH.addPCH(CI.get(), VFS);
+    /*
+    auto &PreprocessorOpts = CI->getPreprocessorOpts();
+    PreprocessorOpts.PrecompiledPreambleBytes.first = 0;
+    PreprocessorOpts.PrecompiledPreambleBytes.second = false;
+    */
+    /*
+    PreambleBounds PreambleRegion = ComputePreambleBounds(*CI->getLangOpts(), *ContentsBuffer, 0);
+    auto &PreprocessorOpts = CI->getPreprocessorOpts();
+    PreprocessorOpts.PrecompiledPreambleBytes.first = PreambleRegion.Size;
+    PreprocessorOpts.PrecompiledPreambleBytes.second =
+        PreambleRegion.PreambleEndsAtStartOfLine;
+    PreprocessorOpts.DisablePCHOrModuleValidation =
+        DisableValidationForModuleKind::PCH;
+    log("semaCodeComplete: pch-preamble. bounds: sz: {0}; ends at start of line: {1}", PreambleRegion.Size, PreambleRegion.PreambleEndsAtStartOfLine);
+    */
   }
+
+  const clang::PrecompiledPreamble *Prmbl = !CompletingInPreamble && Input.Preamble ? &Input.Preamble->Preamble : nullptr;
   auto Clang = prepareCompilerInstance(
-      std::move(CI), !CompletingInPreamble && Input.Preamble ? &Input.Preamble->Preamble : nullptr,
+      std::move(CI), Prmbl,
       std::move(ContentsBuffer), std::move(VFS), IgnoreDiags);
-  Clang->getPreprocessorOpts().SingleFileParseMode = CompletingInPreamble || Input.PCH;
+  Clang->getPreprocessorOpts().SingleFileParseMode = CompletingInPreamble;// || Input.PCH;
   Clang->setCodeCompletionConsumer(Consumer.release());
 
   SyntaxOnlyAction Action;
@@ -2089,7 +2114,6 @@ private:
     dlog("CodeComplete: {0} ({1}) = {2}\n{3}{4}\n", First.Name,
          llvm::to_string(Origin), Scores.Total, llvm::to_string(Quality),
          llvm::to_string(Relevance));
-
     NSema += bool(Origin & SymbolOrigin::AST);
     NIndex += FromIndex;
     NSemaAndIndex += bool(Origin & SymbolOrigin::AST) && FromIndex;
@@ -2275,7 +2299,7 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
   Options.IncludeMacros = false;
   Options.IncludeCodePatterns = false;
   Options.IncludeBriefComments = false;
-  llvm::Optional<PreamblePatch> Patch = PCH ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
+  llvm::Optional<PreamblePatch> Patch = /*PCH ? llvm::None :*/ llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
   semaCodeComplete(
       std::make_unique<SignatureHelpCollector>(Options, DocumentationFormat,
                                                ParseInput.Index, Result),
