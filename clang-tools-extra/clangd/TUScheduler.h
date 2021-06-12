@@ -14,6 +14,7 @@
 #include "Diagnostics.h"
 #include "GlobalCompilationDatabase.h"
 #include "clang-include-cleaner/Record.h"
+#include "PCHManager.h"
 #include "support/Function.h"
 #include "support/MemoryTree.h"
 #include "support/Path.h"
@@ -47,6 +48,7 @@ struct InputsAndPreamble {
   const PreambleData *Preamble;
   // This can be nullptr if no ASTSignals are available.
   const ASTSignals *Signals;
+  PCHManager::PCHAccess PCH;
 };
 
 /// Determines whether diagnostics should be generated for a file snapshot.
@@ -239,7 +241,7 @@ public:
   };
 
   TUScheduler(const GlobalCompilationDatabase &CDB, const Options &Opts,
-              std::unique_ptr<ParsingCallbacks> ASTCallbacks = nullptr);
+              std::unique_ptr<ParsingCallbacks> ASTCallbacks = nullptr, const PCHManager *PCHMgr = nullptr);
   ~TUScheduler();
 
   struct FileStats {
@@ -362,6 +364,7 @@ private:
 
   const GlobalCompilationDatabase &CDB;
   Options Opts;
+  const PCHManager *PCHMgr;
   std::unique_ptr<ParsingCallbacks> Callbacks; // not nullptr
   Semaphore Barrier;
   Semaphore QuickRunBarrier;
