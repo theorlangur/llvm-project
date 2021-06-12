@@ -99,6 +99,8 @@ add_clang_library(clangDaemon
   JSONTransport.cpp
   PathMapping.cpp
   Protocol.cpp
+  PCHManager.cpp
+  PCHManagerQueue.cpp
   Quality.cpp
   ParsedAST.cpp
   Preamble.cpp

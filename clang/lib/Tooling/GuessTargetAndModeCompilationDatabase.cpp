@@ -29,6 +29,14 @@ public:
     return addTargetAndMode(Base->getAllCompileCommands());
   }
 
+  std::vector<std::string> getAllPCHFiles() const override {
+    return Base->getAllPCHFiles();
+  }
+
+  std::vector<CompileCommand> getAllPCHCompileCommands() const override {
+    return addTargetAndMode(Base->getAllPCHCompileCommands());
+  }
+
   std::vector<CompileCommand>
   getCompileCommands(StringRef FilePath) const override {
     return addTargetAndMode(Base->getCompileCommands(FilePath));
