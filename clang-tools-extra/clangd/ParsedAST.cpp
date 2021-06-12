@@ -412,7 +412,7 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   if (PCHAccess && *PCHAccess) 
   {
     Preamble = nullptr;
-    log("building AST for {0} and applying PCH {1}", Inputs.CompileCommand.Filename, PCHAccess->filename());
+    log("building AST for {0} and applying PCH {1} (Version {2})", Inputs.CompileCommand.Filename, PCHAccess->filename(), PCHAccess->version());
     PCHAccess->addPCH(CI.get(), VFS);
   }
 
