@@ -175,6 +175,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
       Callbacks->onBackgroundIndexProgress(T);
     }
   };
+  PCHOpts.WaitForInit = Opts.PCHAlwaysWait;
   PrecompiledHeaderMgr = std::make_unique<PCHManager>(CDB, TFS, *ParseCB, PCHOpts);
 
   // Pass a callback into `WorkScheduler` to extract symbols from a newly
