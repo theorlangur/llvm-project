@@ -42,11 +42,28 @@ namespace tooling {
 
 /// Specifies the working directory and command of a compilation.
 struct CompileCommand {
+
+  /// This is intended to provide an additional info that should help infering
+  /// compile command for files not directly present in compilation database
+  struct Dependency
+  {
+    std::string Filename;
+    std::vector<std::string> RemoveArgs;
+    std::vector<std::string> AddArgs;
+  };
+
   CompileCommand() = default;
   CompileCommand(const Twine &Directory, const Twine &Filename,
                  std::vector<std::string> CommandLine, const Twine &Output)
       : Directory(Directory.str()), Filename(Filename.str()),
         CommandLine(std::move(CommandLine)), Output(Output.str()) {}
+
+  CompileCommand(const Twine &Directory, const Twine &Filename,
+                 std::vector<std::string> CommandLine, const Twine &Output,
+                 std::vector<Dependency> Dependencies)
+      : CompileCommand(Directory, Filename, std::move(CommandLine), Output) { this->Dependencies = std::move(Dependencies); }
+
+  void ApplyDependency(const Dependency &d);
 
   /// The working directory the command was executed from.
   std::string Directory;
@@ -64,6 +81,9 @@ struct CompileCommand {
   /// source, a short human-readable explanation.
   /// e.g. "inferred from foo/bar.h".
   std::string Heuristic;
+
+  std::vector<Dependency> Dependencies;
+  int DependencyIndex = -1;
 
   friend bool operator==(const CompileCommand &LHS, const CompileCommand &RHS) {
     return LHS.Directory == RHS.Directory && LHS.Filename == RHS.Filename &&
@@ -145,6 +165,9 @@ public:
   /// By default, this is implemented in terms of getAllFiles() and
   /// getCompileCommands(). Subclasses may override this for efficiency.
   virtual std::vector<CompileCommand> getAllCompileCommands() const;
+
+  /// Same as getAllFiles but also potentially with additional info
+  virtual std::vector<std::string> getAllFilesWithDeps() const { return getAllFiles(); }
 };
 
 /// A compilation database that returns a single compile command line.
