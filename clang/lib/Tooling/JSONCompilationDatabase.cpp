@@ -25,6 +25,7 @@
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Signals.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/YAMLParser.h"
@@ -227,23 +228,72 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
   SmallString<128> NativeFilePath;
   llvm::sys::path::native(FilePath, NativeFilePath);
 
-  std::string Error;
-  llvm::raw_string_ostream ES(Error);
-  StringRef Match = MatchTrie.findEquivalent(NativeFilePath, ES);
-  if (Match.empty())
-    return {};
-  const auto CommandsRefI = IndexByFile.find(Match);
-  if (CommandsRefI == IndexByFile.end())
-    return {};
+  auto checkIndex = [](FileMatchTrie const& match, llvm::StringMap<std::vector<CompileCommandRef>> const& idx, const SmallString<128>& NativeFilePath)
+  {
+    std::string Error;
+    llvm::raw_string_ostream ES(Error);
+    StringRef Match = match.findEquivalent(NativeFilePath, ES);
+    if (Match.empty())
+      return idx.end();
+    return idx.find(Match);
+  };
+
   std::vector<CompileCommand> Commands;
-  getCommands(CommandsRefI->getValue(), Commands);
+  auto tryGetCommands = [&](decltype(IndexByFile)::const_iterator it, bool withDeps)
+  {
+    bool atLeastOneExactMatch = false;
+    getCommands(it->getValue(), Commands);
+    for (CompileCommand &cc : Commands) {
+      StringRef ccfn = cc.Filename;
+      if (ccfn.endswith(FilePath)) 
+        atLeastOneExactMatch = true;
+      else if (withDeps) {
+        for (size_t i = 0; i < cc.Dependencies.size(); ++i) {
+          CompileCommand::Dependency const &d = cc.Dependencies[i];
+          StringRef fn = d.Filename;
+          if (fn.endswith(FilePath)) {
+            cc.DependencyIndex = (int)i;
+            break;
+          }
+        }
+      }
+    }
+    return atLeastOneExactMatch;
+  };
+
+  bool checkDeps = true;
+  {
+    const auto mainIdx = checkIndex(MatchTrie, IndexByFile, NativeFilePath);
+    if (mainIdx != IndexByFile.end())
+      checkDeps = !tryGetCommands(mainIdx, false);
+  }
+
+  if (!IndexByFileDep.empty() && checkDeps)
+  {
+    const auto depIdx = checkIndex(MatchTrieDep, IndexByFileDep, NativeFilePath);
+    if (depIdx != IndexByFileDep.end())
+      tryGetCommands(depIdx, true);
+
+  }
   return Commands;
 }
 
 std::vector<std::string>
 JSONCompilationDatabase::getAllFiles() const {
   std::vector<std::string> Result;
+  Result.reserve(IndexByFile.size());
   for (const auto &CommandRef : IndexByFile)
+    Result.push_back(CommandRef.first().str());
+  return Result;
+}
+
+std::vector<std::string> JSONCompilationDatabase::getAllFilesWithDeps() const
+{
+  std::vector<std::string> Result;
+  Result.reserve(IndexByFile.size() + IndexByFileDep.size());
+  for (const auto &CommandRef : IndexByFile)
+    Result.push_back(CommandRef.first().str());
+  for (const auto &CommandRef : IndexByFileDep)
     Result.push_back(CommandRef.first().str());
   return Result;
 }
@@ -309,6 +359,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
   return Arguments;
 }
 
+static bool ParseCompileCommandDependency(llvm::yaml::MappingNode *pNode, CompileCommand::Dependency &d)
+{
+  for (auto &depKeyValue : *pNode) {
+    auto *KeyString = dyn_cast<llvm::yaml::ScalarNode>(depKeyValue.getKey());
+    if (!KeyString) {
+      return false;
+    }
+    SmallString<10> KeyStorage;
+    StringRef KeyValue = KeyString->getValue(KeyStorage);
+    llvm::yaml::Node *Value = depKeyValue.getValue();
+    if (!Value) {
+      return false;
+    }
+    auto *ValueString = dyn_cast<llvm::yaml::ScalarNode>(Value);
+    auto *SequenceString = dyn_cast<llvm::yaml::SequenceNode>(Value);
+    if (KeyValue == "file") {
+      if (!ValueString) {
+        return false;
+      }
+      SmallString<10> FileStorage;
+      StringRef FilenameValue = ValueString->getValue(FileStorage);
+      d.Filename = FilenameValue.str();
+    } else if (KeyValue == "add" || KeyValue == "remove") {
+      if (!SequenceString) {
+        return false;
+      }
+      std::vector<std::string> &v =
+          KeyValue == "add" ? d.AddArgs : d.RemoveArgs;
+      for (auto &Argument : *SequenceString) {
+        auto *Scalar = dyn_cast<llvm::yaml::ScalarNode>(&Argument);
+        if (!Scalar) {
+          return false;
+        }
+        SmallString<10> ArgStorage;
+        StringRef ArgValue = Scalar->getValue(ArgStorage);
+        v.push_back(ArgValue.str());
+      }
+    }
+  }
+  return true;
+}
+
+static bool ParseCompileCommandDependencies(llvm::yaml::SequenceNode *pDeps, std::vector<CompileCommand::Dependency> &deps)
+{
+  bool res = true;
+  for (auto &depNode : *pDeps) {
+    auto *Dep = dyn_cast<llvm::yaml::MappingNode>(&depNode);
+    if (!Dep) {
+      return false;
+    }
+    CompileCommand::Dependency d;
+    if (ParseCompileCommandDependency(Dep, d))
+      deps.push_back(std::move(d));
+    else
+      res = false;
+  }
+  return res;
+}
+
 void JSONCompilationDatabase::getCommands(
     ArrayRef<CompileCommandRef> CommandsRef,
     std::vector<CompileCommand> &Commands) const {
@@ -316,12 +425,17 @@ void JSONCompilationDatabase::getCommands(
     SmallString<8> DirectoryStorage;
     SmallString<32> FilenameStorage;
     SmallString<32> OutputStorage;
-    auto Output = std::get<3>(CommandRef);
+    auto *Output = std::get<3>(CommandRef);
+    std::vector<CompileCommand::Dependency> deps;
+    auto depsShared = std::get<4>(CommandRef);
+    if (depsShared.get()) deps = *depsShared;
+
     Commands.emplace_back(
         std::get<0>(CommandRef)->getValue(DirectoryStorage),
         std::get<1>(CommandRef)->getValue(FilenameStorage),
         nodeToCommandLine(Syntax, std::get<2>(CommandRef)),
-        Output ? Output->getValue(OutputStorage) : "");
+        Output ? Output->getValue(OutputStorage) : "",
+        std::move(deps));
   }
 }
 
@@ -351,6 +465,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
     std::optional<std::vector<llvm::yaml::ScalarNode *>> Command;
     llvm::yaml::ScalarNode *File = nullptr;
     llvm::yaml::ScalarNode *Output = nullptr;
+    DepsShared Dependencies;
+
     for (auto& NextKeyValue : *Object) {
       auto *KeyString = dyn_cast<llvm::yaml::ScalarNode>(NextKeyValue.getKey());
       if (!KeyString) {
@@ -380,6 +496,14 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
           }
           Command->push_back(Scalar);
         }
+      } else if (KeyValue == "dependencies") {
+        if (!SequenceString) {
+          ErrorMessage = "Expected sequence as value.";
+          return false;
+        }
+        Dependencies.reset(new std::vector<CompileCommand::Dependency>());
+        if (!ParseCompileCommandDependencies(SequenceString, *Dependencies))
+          ErrorMessage = "Wrong deps";
       } else {
         if (!ValueString) {
           ErrorMessage = "Expected string as value.";
@@ -415,20 +539,40 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
     }
     SmallString<8> FileStorage;
     StringRef FileName = File->getValue(FileStorage);
-    SmallString<128> NativeFilePath;
-    if (llvm::sys::path::is_relative(FileName)) {
-      SmallString<8> DirectoryStorage;
-      SmallString<128> AbsolutePath(Directory->getValue(DirectoryStorage));
-      llvm::sys::path::append(AbsolutePath, FileName);
-      llvm::sys::path::native(AbsolutePath, NativeFilePath);
-    } else {
-      llvm::sys::path::native(FileName, NativeFilePath);
+    auto FileNameToNative = [&Directory](StringRef FileName)->SmallString<128>
+    {
+      SmallString<128> NativeFilePath;
+      if (llvm::sys::path::is_relative(FileName)) {
+        SmallString<8> DirectoryStorage;
+        SmallString<128> AbsolutePath(
+            Directory->getValue(DirectoryStorage));
+        llvm::sys::path::append(AbsolutePath, FileName);
+        llvm::sys::path::native(AbsolutePath, NativeFilePath);
+      } else {
+        llvm::sys::path::native(FileName, NativeFilePath);
+      }
+      llvm::sys::path::remove_dots(NativeFilePath, /*remove_dot_dot=*/ true);
+      return NativeFilePath;
+    };
+    SmallString<128> NativeFilePath = FileNameToNative(FileName);
+
+    if (!ErrorMessage.empty())
+    {
+      llvm::errs() << "Error with deps for file " << NativeFilePath << "\n";
     }
-    llvm::sys::path::remove_dots(NativeFilePath, /*remove_dot_dot=*/true);
-    auto Cmd = CompileCommandRef(Directory, File, *Command, Output);
+
+    auto Cmd = CompileCommandRef(Directory, File, *Command, Output, Dependencies);
     IndexByFile[NativeFilePath].push_back(Cmd);
-    AllCommands.push_back(Cmd);
     MatchTrie.insert(NativeFilePath);
+    if (Dependencies.get())
+    {
+      for (CompileCommand::Dependency const &d : *Dependencies) {
+        SmallString<128> NativeFilePathDep = FileNameToNative(d.Filename);
+        IndexByFileDep[NativeFilePathDep].push_back(Cmd);
+        MatchTrieDep.insert(NativeFilePathDep);
+      }
+    }
+    AllCommands.push_back(Cmd);
   }
   return true;
 }
