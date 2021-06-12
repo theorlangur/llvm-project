@@ -62,9 +62,11 @@ protected:
     // This is needed to we can test index-based operations like call hierarchy.
     Base.BuildDynamicSymbolIndex = true;
     Base.FeatureModules = &FeatureModules;
-    Base.WorkspaceRoot = "/home/orlangur/myapps/cpp/dummy/";
-    Base.ResourceDir = "/home/orlangur/myapps/cpp/cpp_indexer/build/llvm/Debug/lib/clang/13.0.0";
-    //Base.BackgroundIndex = true;
+    //Base.WorkspaceRoot = "/home/orlangur/myapps/cpp/dummy/";
+    //Base.ResourceDir = "/home/orlangur/myapps/cpp/cpp_indexer/build/llvm/Debug/lib/clang/13.0.0";
+    Base.WorkspaceRoot = "d:\\Develoing\\grandma_main\\gma3";
+    Base.ResourceDir = "d:\\Develoing\\cppindex\\cpp_indexer\\build\\llvm\\build\\MSVC\\Debug\\lib\\clang\\13.0.0";
+    Base.BackgroundIndex = false;
   }
 
   LSPClient &start() {
@@ -484,9 +486,10 @@ TEST_F(LSPTest, DiagModuleTest) {
 TEST_F(LSPTest, PCHTest) {
   auto &Client = start();
   using namespace std::chrono_literals;
-  int fd;
-  const char *pPath = "/home/orlangur/myapps/cpp/dummy/source/db/db2.h";
-  llvm::sys::fs::openFileForRead(pPath, fd);
+  llvm::sys::fs::file_t fd;
+  //const char *pPath = "/home/orlangur/myapps/cpp/dummy/source/db/db2.h";
+  const char *pPath = "d:\\Developing\\grandma_main\\gma3\\source\\lib_db\\db_drives.h";
+  fd = *llvm::sys::fs::openNativeFileForRead(pPath);
   uint64_t sz;
   llvm::sys::fs::file_size(pPath, sz);
   std::vector<char> content;
@@ -495,7 +498,7 @@ TEST_F(LSPTest, PCHTest) {
   content[sz] = 0;
   llvm::sys::fs::closeFile(fd);
   Client.didOpen(pPath, content.data());
-  std::this_thread::sleep_for(15s);
+  std::this_thread::sleep_for(155s);
   //for(int i = 0; i < 5; ++i)
   {
     Client.notify(
@@ -506,14 +509,16 @@ TEST_F(LSPTest, PCHTest) {
                  pPath, 36)},
             {"contentChanges", {llvm::json::Object{
               {"range", llvm::json::Object{
-                {"start", Position{16, 7}},
-                {"end", Position{16, 7}}
+                //{"start", Position{16, 7}},
+                //{"end", Position{16, 7}}
+                {"start", Position{76, 16}},
+                {"end", Position{76, 16}}
               }},
               {"rangeLength", 0},
-              {"text", "x"},
+              {"text", "v"},
             }}},
         });
-    std::this_thread::sleep_for(80ms);
+    std::this_thread::sleep_for(8s);
   }
   {
     auto &Def = Client.call(
@@ -523,9 +528,10 @@ TEST_F(LSPTest, PCHTest) {
              Client.documentID(
                  pPath)},
             {"context", llvm::json::Object{{"triggerKind", 1}}},
-            {"position", Position{16, 8}},
+            //{"position", Position{16, 8}},
+            {"position", Position{76, 17}},
         });
-    std::this_thread::sleep_for(1s);
+    std::this_thread::sleep_for(3s);
   }
                           /*
   auto &Def = Client.call("textDocument/hover",
