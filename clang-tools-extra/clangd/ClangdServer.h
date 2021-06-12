@@ -16,6 +16,7 @@
 #include "FeatureModule.h"
 #include "GlobalCompilationDatabase.h"
 #include "Hover.h"
+#include "PCHManager.h"
 #include "Protocol.h"
 #include "SemanticHighlighting.h"
 #include "TUScheduler.h"
@@ -471,6 +472,8 @@ private:
   std::unique_ptr<BackgroundIndex> BackgroundIdx;
   // Storage for merged views of the various indexes.
   std::vector<std::unique_ptr<SymbolIndex>> MergedIdx;
+  // If present, an index of symbols in open files. Read via *Index.
+  std::unique_ptr<PCHManager> PrecompiledHeaderMgr;
 
   // When set, provides clang-tidy options for a specific file.
   TidyProviderRef ClangTidyProvider;
