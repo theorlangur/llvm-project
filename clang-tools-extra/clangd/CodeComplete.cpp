@@ -2300,7 +2300,7 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
   Options.IncludeMacros = false;
   Options.IncludeCodePatterns = false;
   Options.IncludeBriefComments = false;
-  llvm::Optional<PreamblePatch> Patch = Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
+  llvm::Optional<PreamblePatch> Patch = !Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
   semaCodeComplete(
       std::make_unique<SignatureHelpCollector>(Options, DocumentationFormat,
                                                ParseInput.Index, Result),
