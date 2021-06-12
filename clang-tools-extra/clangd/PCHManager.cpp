@@ -627,15 +627,15 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   Act->EndSourceFile();
 
   if (!Act->hasEmittedPreamblePCH()) {
-    elog("(PCH)Could not emmit PCH for {0}", Item.CompileCommand.Filename);
+    elog("(PCH)Could not emmit PCH for {0} (Version: {1})", Item.CompileCommand.Filename, Item.Version);
     return;
   }
 
   Item.Includes = SerializedDeclsCollector.takeIncludes();
   Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
   S = PCHItem::State::Valid;
-  log("(PCH)Successfully generated precompiled header of size: {0} (file: {1})",
-      Item.PCHData.size(), Item.CompileCommand.Filename);
+  log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
+      Item.PCHData.size(), Item.CompileCommand.Filename, Item.Version);
 }
 
 void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
@@ -722,9 +722,11 @@ bool PCHManager::PCHAccess::addPCH(
     CompilerInvocation *CI,
     IntrusiveRefCntPtr<llvm::vfs::FileSystem> &VFS) const {
   if (Item) {
-    CI->getPreprocessorOpts().DisablePCHOrModuleValidation =
+    auto &pp = CI->getPreprocessorOpts();
+    pp.AllowPCHWithCompilerErrors = true;
+    pp.DisablePCHOrModuleValidation =
         DisableValidationForModuleKind::PCH;
-    CI->getPreprocessorOpts().ImplicitPCHInclude =
+    pp.ImplicitPCHInclude =
         std::string(Item->CompileCommand.Filename) + ".pch";
     VFS = addDependencies(Item, VFS);
     return true;

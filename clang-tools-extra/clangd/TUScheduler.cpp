@@ -922,7 +922,7 @@ void ASTWorker::update(ParseInputs Inputs, WantDiagnostics WantDiags,
     PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->tryFindPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
     if (PCH)
     {
-      log("ASTWorker: discovered PCH for {0}. Skipping preamble build", FileName);
+      log("ASTWorker: discovered PCH for {0}. (Version: {1}) Skipping preamble build", FileName, PCH.version());
       IdleASTs.take(this);
       RanASTCallback = false;
       LatestPreamble.emplace();
