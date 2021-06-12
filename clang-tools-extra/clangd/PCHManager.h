@@ -109,6 +109,7 @@ public:
 
     bool addPCH(CompilerInvocation *CI, IntrusiveRefCntPtr<llvm::vfs::FileSystem> &VFS) const;
     llvm::StringRef filename() const {return Item->CompileCommand.Filename;}
+    auto version() const { return Item->Version; }
 
     operator bool() const { return Item != nullptr; }
   private:
