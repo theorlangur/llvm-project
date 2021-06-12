@@ -264,6 +264,10 @@ struct SpeculativeFuzzyFind {
   /// The result is consumed by `codeComplete()` if speculation succeeded.
   /// NOTE: the destructor will wait for the async call to finish.
   std::future<SymbolSlab> Result;
+
+  void test()
+  {
+  }
 };
 
 /// Gets code completions at a specified \p Pos in \p FileName.

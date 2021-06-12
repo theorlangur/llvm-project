@@ -24,6 +24,7 @@
 
 #include "CollectMacros.h"
 #include "Compiler.h"
+#include "PCHManager.h"
 #include "Diagnostics.h"
 #include "FS.h"
 #include "Headers.h"
@@ -81,7 +82,7 @@ using PreambleParsedCallback =
 std::shared_ptr<const PreambleData>
 buildPreamble(PathRef FileName, CompilerInvocation CI,
               const ParseInputs &Inputs, bool StoreInMemory,
-              PreambleParsedCallback PreambleCallback);
+              PreambleParsedCallback PreambleCallback, const PCHManager *PCHMgr = nullptr);
 
 /// Returns true if \p Preamble is reusable for \p Inputs. Note that it will
 /// return true when some missing headers are now available.

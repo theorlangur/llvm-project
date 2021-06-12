@@ -317,7 +317,7 @@ PreambleData::PreambleData(const ParseInputs &Inputs,
 std::shared_ptr<const PreambleData>
 buildPreamble(PathRef FileName, CompilerInvocation CI,
               const ParseInputs &Inputs, bool StoreInMemory,
-              PreambleParsedCallback PreambleCallback) {
+              PreambleParsedCallback PreambleCallback, const PCHManager *PCHMgr/* = nullptr*/) {
   // Note that we don't need to copy the input contents, preamble can live
   // without those.
   auto ContentsBuffer =
@@ -369,6 +369,14 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
   auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
   llvm::SmallString<32> AbsFileName(FileName);
   VFS->makeAbsolute(AbsFileName);
+
+  PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->findPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
+  if (PCH)
+  {
+    log("Applying PCH {0} to build preamble for {1}", PCH.filename(), FileName);
+    PCH.addPCH(&CI, VFS);
+  }
+
   auto StatCache = std::make_unique<PreambleFileStatusCache>(AbsFileName);
   auto BuiltPreamble = PrecompiledPreamble::Build(
       CI, ContentsBuffer.get(), Bounds, *PreambleDiagsEngine,
