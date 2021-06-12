@@ -680,7 +680,7 @@ PCHManager::tryFindPCH(clang::clangd::PathRef PCHFile) const {
 PCHManager::PCHAccess
 PCHManager::findPCH(tooling::CompileCommand const &Cmd) const {
   // return {};
-  /*if (llvm::StringRef(Cmd.Filename).endswith(".h"))
+  /* if (llvm::StringRef(Cmd.Filename).endswith(".h"))
   {
     log("(findPCH) turned off for headers. {0}", Cmd.Filename);
     return {};
