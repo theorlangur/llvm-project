@@ -180,7 +180,7 @@ PCHManager::PCHManager(const GlobalCompilationDatabase &CDB,
   ThreadPool.runAsync("pch-worker",
                       [this, Ctx(Context::current().clone())]() mutable {
                         WithContext BGContext(std::move(Ctx));
-                        Queue.work({});
+                        Queue.work([&]{Queue.push(checkChangedPeriodically());});
                       });
 }
 
@@ -199,19 +199,59 @@ PCHManager::changedFilesTask(const std::vector<std::string> &ChangedFiles,
   return T;
 }
 
+PCHQueue::Task PCHManager::checkChangedPeriodically()
+{
+  PCHQueue::Task T([this] {
+    using namespace std::chrono_literals;
+    std::this_thread::sleep_for(500ms);
+    if (!Changed.empty())
+    {
+      std::unique_lock<std::mutex> Lock(ChangedMtx);
+      auto Dms = std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - ChangedLastTime).count();
+      if (Dms > 2000)
+      {
+        log("(PCH) sending changed file for processing ({0} items)", Changed.size());
+        enqueue(Changed, ChangedFS);
+        Changed.clear();
+        ChangedFS = nullptr;
+        return;
+      }
+    }
+
+    Queue.push(checkChangedPeriodically());
+  });
+  return T;
+}
+
 void PCHManager::checkChangedFile(PathRef File, FSType FS) {
   if (!Initialized)
-    return;
+  {
+      log("(PCH) check changed file: not initialized yet");
+      return;
+  }
 
   {
     shared_lck SharedAccessToAllHeaders(UsedHeadersLock);
     if (!AllUsedHeaders.contains(File))
-      return;
+    {
+      std::string LowerCase(File);
+      if (LowerCase[0] != std::tolower(LowerCase[0]))
+        LowerCase[0] = std::tolower(LowerCase[0]);
+      else
+        LowerCase[0] = std::toupper(LowerCase[0]);
+      if (!AllUsedHeaders.contains(LowerCase)) {
+        log("(PCH) file {0}/{1} doesn't affect any PCHs", File, LowerCase);
+        return;
+      }
+    }
   }
 
-  std::vector<std::string> Changed;
-  Changed.emplace_back(File);
-  enqueue(Changed, FS);
+  {
+    std::unique_lock<std::mutex> Lock(ChangedMtx);
+    ChangedLastTime = clock_t::now();
+    Changed.emplace_back(File);
+    ChangedFS = FS;
+  }
 }
 
 void PCHManager::updateAllHeaders() {
@@ -357,15 +397,21 @@ unsigned PCHManager::invalidateAffectedPCH(
     const std::vector<std::string> &ChangedFiles) {
   uniq_lck ExclusiveAccessToPCH(PCHLock);
   unsigned Invalidated = 0;
-  llvm::StringSet<> Changed;
-  for (const auto &S : ChangedFiles)
-    Changed.insert(S);
+  llvm::StringSet<> ChangedU;
+  llvm::StringSet<> ChangedL;
+  for (auto S : ChangedFiles)
+  {
+    S[0] = std::toupper(S[0]);
+    ChangedU.insert(S);
+    S[0] = std::tolower(S[0]);
+    ChangedL.insert(S);
+  }
   for (auto &UI : PCHs) {
     PCHItem &Item = *UI;
     if (Item.ItemState == PCHItem::State::Rebuild)
       continue;
 
-    if (Changed.find(Item.CompileCommand.Filename) != Changed.end()) {
+    if (ChangedU.contains(Item.CompileCommand.Filename) || ChangedL.contains(Item.CompileCommand.Filename)) {
       log("(PCH) invalidating {0} and all dependendents",
           Item.CompileCommand.Filename);
       Invalidated += Item.invalidate(ExclusiveAccessToPCH);
@@ -373,7 +419,7 @@ unsigned PCHManager::invalidateAffectedPCH(
     }
 
     for (const auto &S : Item.Includes.allHeaders()) {
-      if (Changed.find(S) != Changed.end()) {
+      if (ChangedU.contains(S) || ChangedL.contains(S)) {
         log("(PCH) invalidating {0} and all dependendents because"
             " of the included (possible indirectly) {1} has changed",
             Item.CompileCommand.Filename, S);
@@ -406,11 +452,21 @@ PCHManager::addDependencies(const PCHItem *Dep,
 void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   auto S = PCHItem::State::Invalid;
   auto OnExit = llvm::make_scope_exit([&] {
+    if (OnProgress)
+      OnProgress(Stats{++Complete, Total});
     Item.ItemState = S;
     Item.CV.notify_all();
   });
 
   PCHItem *Dep = Item.IdependOn.empty() ? nullptr : Item.IdependOn[0];
+  if (Dep && Dep->ItemState == PCHItem::State::Rebuild) {
+    elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
+         "in rebuild state",
+         Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
+    
+    shared_lck Lock(PCHLock);
+    Dep->CV.wait(Lock, [&] { return Dep->ItemState != PCHItem::State::Rebuild; });
+  }
   if (Dep && Dep->ItemState != PCHItem::State::Valid) {
     elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
          "invalid",
@@ -580,16 +636,24 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 }
 
 void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
-  unsigned Complete = 0;
-  if (OnProgress)
-    OnProgress(Stats{Complete, Total});
+  Complete = 0;
+  this->Total = Total;
+  if (OnProgress) OnProgress(Stats{Complete, Total});
+  std::vector<std::thread> Builders;
+  Builders.reserve(PCHs.size());
   for (auto &I : PCHs) {
     if (I->ItemState == PCHItem::State::Rebuild) {
-      rebuildPCH(*I, FS);
-      if (OnProgress)
-        OnProgress(Stats{++Complete, Total});
+      //rebuildPCH(*I, FS);
+      Builders.emplace_back(
+          [this,It=&*I,FS]() {
+            rebuildPCH(*It, FS);
+          }
+      );
     }
   }
+
+  for(auto &T : Builders)
+    T.join();
 }
 
 PCHManager::PCHAccess

@@ -138,6 +138,9 @@ public:
     }
 
     PCHQueue::Task
+    checkChangedPeriodically();
+
+    PCHQueue::Task
     changedFilesTask(const std::vector<std::string> &ChangedFiles, FSType FS);
 
     PCHQueue::Task
@@ -189,8 +192,18 @@ public:
     mutable std::shared_timed_mutex PCHLock;
     AsyncTaskRunner ThreadPool;
 
+    using clock_t = std::chrono::steady_clock;
+    using time_point_t = std::chrono::time_point<clock_t>;
+    std::mutex ChangedMtx;
+    std::vector<std::string> Changed;
+    FSType ChangedFS;
+    time_point_t ChangedLastTime;
+
     llvm::StringSet<> AllUsedHeaders;
     mutable std::shared_timed_mutex UsedHeadersLock;
+
+    unsigned Total=0;
+    std::atomic<unsigned> Complete{0};
 };
 } // namespace clangd
 } // namespace clang
