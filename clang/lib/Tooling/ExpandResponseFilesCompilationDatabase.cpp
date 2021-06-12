@@ -37,6 +37,10 @@ public:
     return Base->getAllFiles();
   }
 
+  std::vector<std::string> getAllPCHFiles() const override {
+    return Base->getAllPCHFiles();
+  }
+
   std::vector<std::string> getAllFilesWithDeps() const override {
     return Base->getAllFilesWithDeps();
   }
@@ -48,6 +52,10 @@ public:
 
   std::vector<CompileCommand> getAllCompileCommands() const override {
     return expand(Base->getAllCompileCommands());
+  }
+
+  std::vector<CompileCommand> getAllPCHCompileCommands() const override {
+    return expand(Base->getAllPCHCompileCommands());
   }
 
 private:

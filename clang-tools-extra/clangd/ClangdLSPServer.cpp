@@ -1745,9 +1745,10 @@ void ClangdLSPServer::onBackgroundIndexProgress(
       WorkDoneProgressReport Report;
       Report.percentage = 100 * (Stats.Completed - Stats.LastIdle) /
                           (Stats.Enqueued - Stats.LastIdle);
+      const char *Prefix = Stats.StatType == BackgroundQueue::Stats::Type::PCH ? "PCH " : "";
       Report.message =
-          llvm::formatv("{0}/{1}", Stats.Completed - Stats.LastIdle,
-                        Stats.Enqueued - Stats.LastIdle);
+          llvm::formatv("{2}{0}/{1}", Stats.Completed - Stats.LastIdle,
+                        Stats.Enqueued - Stats.LastIdle, Prefix);
       ReportWorkDoneProgress({ProgressToken, std::move(Report)});
     } else {
       assert(Stats.Completed == Stats.Enqueued);
