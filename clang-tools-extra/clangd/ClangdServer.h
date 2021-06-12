@@ -190,6 +190,9 @@ public:
     /// regions in the document.
     bool PublishInactiveRegions = false;
 
+    //defines wether operations on TUs should wait for PCHs manager to be initialized on the start
+    bool PCHAlwaysWait = true;
+
     explicit operator TUScheduler::Options() const;
   };
   // Sensible default options for use in tests.

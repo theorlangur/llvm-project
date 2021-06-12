@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
 #include <utility>
 
 namespace clang {
@@ -174,7 +175,8 @@ PCHManager::PCHManager(const GlobalCompilationDatabase &CDB,
       PCHAnnounce(CDB.watch(
           [&](const std::vector<tooling::CompileCommand> &PCHAnnounced) {
             enqueue(PCHAnnounced);
-          })) {
+          })),
+      WaitForInit(Opts.WaitForInit) {
   ThreadPool.runAsync("pch-worker",
                       [this, Ctx(Context::current().clone())]() mutable {
                         WithContext BGContext(std::move(Ctx));
@@ -342,6 +344,7 @@ unsigned PCHManager::PCHItem::invalidate(uniq_lck &Lock) {
       CV.wait(Lock, [&] { return InUse == 0; });
 
     ItemState = PCHItem::State::Rebuild;
+    ++Version;
     PCHData.clear();
     // all dependencies must be invalidated
     for (PCHItem *Dep : DependOnMe)
@@ -466,7 +469,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       [&](ASTContext &AST, std::shared_ptr<clang::Preprocessor> PP,
           const CanonicalIncludes &CanInc) {
         // call Callback.onPreambleAST
-        Callbacks.onPreambleAST(Item.CompileCommand.Filename, "0", AST,
+        Callbacks.onPreambleAST(Item.CompileCommand.Filename, std::to_string(Item.Version), AST,
                                 std::move(PP), CanInc);
       });
   PreambleCallbacks &Callbacks = SerializedDeclsCollector;
@@ -591,7 +594,7 @@ void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
 
 PCHManager::PCHAccess
 PCHManager::tryFindPCH(tooling::CompileCommand const &Cmd) const {
-  if (!Initialized) {
+  if (!Initialized && !WaitForInit) {
     log("(findPCH) is not initialized yet. Return empty for {0}", Cmd.Filename);
     return {};
   }
@@ -600,7 +603,7 @@ PCHManager::tryFindPCH(tooling::CompileCommand const &Cmd) const {
 
 PCHManager::PCHAccess
 PCHManager::tryFindPCH(clang::clangd::PathRef PCHFile) const {
-  if (!Initialized) {
+  if (!Initialized && !WaitForInit) {
     log("(findPCH) is not initialized yet. Return empty for {0}", PCHFile);
     return {};
   }

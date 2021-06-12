@@ -405,6 +405,13 @@ opt<PCHStorageFlag> PCHStorage{
     init(PCHStorageFlag::Disk),
 };
 
+opt<bool> PCHAlwaysWait{
+    "pch-always-wait",
+    cat(Features),
+    desc("at the start, when processing single file, if there's a PCH specified for it, it will always wait for PCHs to be initialized"),
+    init(true),
+};
+
 opt<bool> Sync{
     "sync",
     cat(Misc),
@@ -877,6 +884,8 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
     Opts.StorePreamblesInMemory = false;
     break;
   }
+  Opts.PCHAlwaysWait = PCHAlwaysWait;
+
   if (!ResourceDir.empty())
     Opts.ResourceDir = ResourceDir;
   Opts.BuildDynamicSymbolIndex = true;
