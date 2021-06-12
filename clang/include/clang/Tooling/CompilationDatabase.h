@@ -168,6 +168,11 @@ public:
 
   /// Same as getAllFiles but also potentially with additional info
   virtual std::vector<std::string> getAllFilesWithDeps() const { return getAllFiles(); }
+
+  /// Returns list of all precompiled header files known to the database
+  virtual std::vector<std::string> getAllPCHFiles() const { return {}; }
+  /// Returns list of all commands to generate precompiled headers known to the database
+  virtual std::vector<CompileCommand> getAllPCHCompileCommands() const;
 };
 
 /// A compilation database that returns a single compile command line.

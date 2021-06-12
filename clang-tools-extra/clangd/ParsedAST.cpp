@@ -403,13 +403,18 @@ std::optional<ParsedAST>
 ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
                  std::unique_ptr<clang::CompilerInvocation> CI,
                  llvm::ArrayRef<Diag> CompilerInvocationDiags,
-                 std::shared_ptr<const PreambleData> Preamble) {
+                 std::shared_ptr<const PreambleData> Preamble, PCHManager::PCHAccess *PCHAccess) {
   trace::Span Tracer("BuildAST");
   SPAN_ATTACH(Tracer, "File", Filename);
   const Config &Cfg = Config::current();
 
   auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
-  if (Preamble && Preamble->StatCache)
+  if (PCHAccess && *PCHAccess) 
+  {
+    Preamble = nullptr;
+    log("building AST for {0} and applying PCH {1}", Inputs.CompileCommand.Filename, PCHAccess->filename());
+    PCHAccess->addPCH(CI.get(), VFS);
+  }else if (Preamble && Preamble->StatCache)
     VFS = Preamble->StatCache->getConsumingFS(std::move(VFS));
 
   assert(CI);

@@ -272,8 +272,14 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
   {
     const auto depIdx = checkIndex(MatchTrieDep, IndexByFileDep, NativeFilePath);
     if (depIdx != IndexByFileDep.end())
-      tryGetCommands(depIdx, true);
+      checkDeps = !tryGetCommands(depIdx, true);
+  }
 
+  if (!IndexByPCH.empty() && checkDeps)
+  {
+    const auto depIdx = checkIndex(MatchTriePCH, IndexByPCH, NativeFilePath);
+    if (depIdx != IndexByPCH.end())
+      checkDeps = !tryGetCommands(depIdx, true);
   }
   return Commands;
 }
@@ -287,6 +293,15 @@ JSONCompilationDatabase::getAllFiles() const {
   return Result;
 }
 
+std::vector<std::string> JSONCompilationDatabase::getAllPCHFiles() const
+{
+  std::vector<std::string> Result;
+  Result.reserve(IndexByPCH.size());
+  for (const auto &CommandRef : IndexByPCH)
+    Result.emplace_back(CommandRef.first().str());
+  return Result;
+}
+
 std::vector<std::string> JSONCompilationDatabase::getAllFilesWithDeps() const
 {
   std::vector<std::string> Result;
@@ -296,6 +311,13 @@ std::vector<std::string> JSONCompilationDatabase::getAllFilesWithDeps() const
   for (const auto &CommandRef : IndexByFileDep)
     Result.push_back(CommandRef.first().str());
   return Result;
+}
+
+std::vector<CompileCommand> JSONCompilationDatabase::getAllPCHCompileCommands() const
+{
+  std::vector<CompileCommand> Commands;
+  getCommands(PCHCommands, Commands);
+  return Commands;
 }
 
 std::vector<CompileCommand>
@@ -439,6 +461,33 @@ void JSONCompilationDatabase::getCommands(
   }
 }
 
+bool JSONCompilationDatabase::isPCHCommand(CompileCommandRef const& cmd) const
+{
+  bool res = false;
+  auto const& commands = std::get<2>(cmd);
+  if (commands.size() == 1)
+  {
+    StringRef rawVal = commands[0]->getRawValue();
+    size_t p = 0;
+    while((p = rawVal.find("c++-header", p)) != StringRef::npos)
+    {
+      size_t cppheader = p;
+      if ((p = rawVal.rfind('x', p)) != StringRef::npos && (p > 0))
+      {
+        if ((rawVal[p - 1] == '-') && (rawVal.find_first_not_of(' ', p + 1) == cppheader))
+        {
+          res = true;
+          break;
+        }
+      }
+    }
+  }else
+  {
+    //TODO: analyze arguments
+  }
+  return res;
+}
+
 bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
   llvm::yaml::document_iterator I = YAMLStream.begin();
   if (I == YAMLStream.end()) {
@@ -562,8 +611,18 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
     }
 
     auto Cmd = CompileCommandRef(Directory, File, *Command, Output, Dependencies);
-    IndexByFile[NativeFilePath].push_back(Cmd);
-    MatchTrie.insert(NativeFilePath);
+    if (isPCHCommand(Cmd))
+    {
+      IndexByPCH[NativeFilePath].push_back(Cmd);
+      MatchTriePCH.insert(NativeFilePath);
+      PCHCommands.push_back(Cmd);
+    }else
+    {
+      IndexByFile[NativeFilePath].push_back(Cmd);
+      MatchTrie.insert(NativeFilePath);
+      AllCommands.push_back(Cmd);
+    }
+
     if (Dependencies.get())
     {
       for (CompileCommand::Dependency const &d : *Dependencies) {
@@ -572,7 +631,10 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
         MatchTrieDep.insert(NativeFilePathDep);
       }
     }
-    AllCommands.push_back(Cmd);
+  }
+  if (!PCHCommands.empty())
+  {
+      llvm::errs() << "Found " << PCHCommands.size() << " PCH commands\n";
   }
   return true;
 }

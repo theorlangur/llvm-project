@@ -226,6 +226,10 @@ llvm::json::Value LSPClient::documentID(llvm::StringRef Path) {
   return Obj{{"uri", uri(Path)}};
 }
 
+llvm::json::Value LSPClient::documentID(llvm::StringRef Path, int ver) {
+  return Obj{{"uri", uri(Path)}, {"version", ver}};
+}
+
 void LSPClient::didOpen(llvm::StringRef Path, llvm::StringRef Content) {
   notify(
       "textDocument/didOpen",
