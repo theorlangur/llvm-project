@@ -414,7 +414,9 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
     Preamble = nullptr;
     log("building AST for {0} and applying PCH {1}", Inputs.CompileCommand.Filename, PCHAccess->filename());
     PCHAccess->addPCH(CI.get(), VFS);
-  }else if (Preamble && Preamble->StatCache)
+  }
+
+  if (Preamble && Preamble->StatCache)
     VFS = Preamble->StatCache->getConsumingFS(std::move(VFS));
 
   assert(CI);
