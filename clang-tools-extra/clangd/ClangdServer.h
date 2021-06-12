@@ -228,7 +228,7 @@ public:
   void addDocument(PathRef File, StringRef Contents,
                    llvm::StringRef Version = "null",
                    WantDiagnostics WD = WantDiagnostics::Auto,
-                   bool ForceRebuild = false);
+                   bool ForceRebuild = false, bool AfterChange = false);
 
   /// Remove \p File from list of tracked files, schedule a request to free
   /// resources associated with it. Pending diagnostics for closed files may not

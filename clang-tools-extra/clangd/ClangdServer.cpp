@@ -311,12 +311,12 @@ ClangdServer::~ClangdServer() {
 
 void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                llvm::StringRef Version,
-                               WantDiagnostics WantDiags, bool ForceRebuild) {
+                               WantDiagnostics WantDiags, bool ForceRebuild, bool AfterChange) {
   bool Existed = DraftMgr.getDraft(File).hasValue();
   std::string ActualVersion = DraftMgr.addDraft(File, Version, Contents);
   ParseOptions Opts;
 
-  if (Existed)
+  if (Existed && AfterChange)
   {
     //slow. needs to be done in bulk
     PrecompiledHeaderMgr->checkChangedFile(File, DraftMgr.asVFS());

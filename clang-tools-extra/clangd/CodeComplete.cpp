@@ -1379,6 +1379,7 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   std::tie(FrontendOpts.CodeCompletionAt.Line,
            FrontendOpts.CodeCompletionAt.Column) =
       offsetToClangLineColumn(Input.ParseInput.Contents, Input.Offset);
+  log("Sema complete at {0}:{1}", FrontendOpts.CodeCompletionAt.Line, FrontendOpts.CodeCompletionAt.Column);
 
   std::unique_ptr<llvm::MemoryBuffer> ContentsBuffer =
       llvm::MemoryBuffer::getMemBuffer(Input.ParseInput.Contents,
