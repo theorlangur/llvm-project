@@ -728,7 +728,7 @@ void ClangdLSPServer::onDocumentDidChange(
     }
   }
   Server->addDocument(File, NewCode, encodeVersion(Params.textDocument.version),
-                      WantDiags, Params.forceRebuild);
+                      WantDiags, Params.forceRebuild, true);
 }
 
 void ClangdLSPServer::onDocumentDidSave(
