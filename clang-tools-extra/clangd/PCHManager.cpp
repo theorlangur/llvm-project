@@ -494,6 +494,7 @@ bool PCHManager::tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS)
     Item->IdependOn.push_back(const_cast<PCHItem*>(depAccess.Item));
     Item->Dynamic = true;
     DynamicPCHs[Cmd.Filename] = Item;
+    log("(DynPCH) added dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
     Queue.push(PCHQueue::Task([this, FS] { rebuildInvalidatedPCH(1, FS); }));
   }
 
@@ -507,7 +508,12 @@ bool PCHManager::tryRemoveDynamicPCH(tooling::CompileCommand const &Cmd) {
     return false;
 
   uniq_lck Lock(DynamicPCHLock); 
-  return DynamicPCHs.erase(Cmd.Filename) == 1;
+
+  if (DynamicPCHs.erase(Cmd.Filename) == 1) {
+    log("(DynPCH) removed dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
+    return true;
+  }
+  return false;
 }
 
 IntrusiveRefCntPtr<llvm::vfs::FileSystem>
