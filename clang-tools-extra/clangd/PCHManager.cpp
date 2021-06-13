@@ -511,9 +511,10 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   auto VFS = TFS.view(Item.CompileCommand.Directory);
   if (FS) {
+    log("(PCH) using passed FS as overlay");
     IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
-        new llvm::vfs::OverlayFileSystem(FS)); // passed FS is primary
-    Overlay->pushOverlay(VFS);                 // VFS is secondary
+        new llvm::vfs::OverlayFileSystem(VFS)); // passed VFS is primary
+    Overlay->pushOverlay(FS);                 // FS is secondary
     VFS = Overlay;
   }
   if (Dep) {

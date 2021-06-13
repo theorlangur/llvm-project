@@ -59,6 +59,8 @@ struct ParseInputs {
   TidyProviderRef ClangTidyProvider = {};
   // Used to acquire ASTListeners when parsing files.
   FeatureModuleSet *FeatureModules = nullptr;
+
+  IntrusiveRefCntPtr<llvm::vfs::FileSystem> DraftFS;
 };
 
 /// Builds compiler invocation that could be used to build AST or preamble.
