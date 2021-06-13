@@ -92,6 +92,8 @@ public:
     assert(Listeners.empty());
   }
 
+  unsigned subscribed() const { return ListenerCount; }
+
 private:
   static_assert(std::is_same<std::decay_t<T>, T>::value,
                 "use a plain type: event values are always passed by const&");
