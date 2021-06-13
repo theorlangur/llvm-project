@@ -437,7 +437,7 @@ PCHManager::addDependencies(const PCHItem *Dep,
   IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS(
       new llvm::vfs::InMemoryFileSystem());
   while (Dep) {
-    auto data = Dep->PCHData;
+    auto data = std::atomic_load(&Dep->PCHData);
     if (data) {
 		pchdatas.emplace_back(data);
 		auto Buf = llvm::MemoryBuffer::getMemBuffer(*data);
@@ -643,7 +643,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   Item.Includes = SerializedDeclsCollector.takeIncludes();
   Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
-  Item.PCHData = newPCH;
+  std::atomic_store(&Item.PCHData, newPCH);
   S = PCHItem::State::Valid;
   log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
       Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
@@ -716,7 +716,7 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
   for (const auto &I : PCHs) {
     if (I->CompileCommand.Filename == PCHFile) {
       if (I->ItemState == PCHItem::State::Rebuild) {
-        auto data = I->PCHData;
+        auto data = std::atomic_load(&I->PCHData);
         if (data->empty())//if it's empty - we wait. If there's some old PCH - we use it right away to avoid delays
 			I->CV.wait(Lock, [&] { return I->ItemState != PCHItem::State::Rebuild; });
       }
