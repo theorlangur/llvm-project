@@ -488,7 +488,7 @@ TEST_F(LSPTest, PCHTest) {
   using namespace std::chrono_literals;
   llvm::sys::fs::file_t fd;
   //const char *pPath = "/home/orlangur/myapps/cpp/dummy/source/db/db2.h";
-  const char *pPath = "d:\\Developing\\grandma_main\\gma3\\source\\lib_db\\db_drives.h";
+  const char *pPath = "d:\\Developing\\grandma_main\\gma3\\source\\lib_db\\selection\\db_sel_group.h";
   fd = *llvm::sys::fs::openNativeFileForRead(pPath);
   uint64_t sz;
   llvm::sys::fs::file_size(pPath, sz);
@@ -498,7 +498,7 @@ TEST_F(LSPTest, PCHTest) {
   content[sz] = 0;
   llvm::sys::fs::closeFile(fd);
   Client.didOpen(pPath, content.data());
-  std::this_thread::sleep_for(155s);
+  std::this_thread::sleep_for(555s);
   //for(int i = 0; i < 5; ++i)
   {
     Client.notify(
