@@ -63,6 +63,7 @@ struct ParseInputs {
   FeatureModuleSet *FeatureModules = nullptr;
   // Used to build and manage (C++) modules.
   ModulesBuilder *ModulesManager = nullptr;
+  IntrusiveRefCntPtr<llvm::vfs::FileSystem> DraftFS;
 };
 
 /// Clears \p CI from options that are not supported by clangd, like codegen or
