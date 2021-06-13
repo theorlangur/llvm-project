@@ -509,7 +509,7 @@ TEST(ParsedASTTest, ReplayPreambleForTidyCheckers) {
     IgnoreDiagnostics Diags;
     auto CI = buildCompilerInvocation(TU.inputs(FS), Diags);
     auto PatchedAST = ParsedAST::build(testPath(TU.Filename), TU.inputs(FS),
-                                       std::move(CI), {}, BaselinePreamble, nullptr);
+                                       std::move(CI), {}, BaselinePreamble);
     ASSERT_TRUE(PatchedAST);
     EXPECT_FALSE(PatchedAST->getDiagnostics());
   }
@@ -524,7 +524,7 @@ TEST(ParsedASTTest, ReplayPreambleForTidyCheckers) {
   IgnoreDiagnostics Diags;
   auto CI = buildCompilerInvocation(TU.inputs(FS), Diags);
   auto PatchedAST = ParsedAST::build(testPath(TU.Filename), TU.inputs(FS),
-                                     std::move(CI), {}, BaselinePreamble, nullptr);
+                                     std::move(CI), {}, BaselinePreamble);
   ASSERT_TRUE(PatchedAST);
   EXPECT_FALSE(PatchedAST->getDiagnostics());
   EXPECT_THAT(Includes,
@@ -567,7 +567,7 @@ TEST(ParsedASTTest, PatchesAdditionalIncludes) {
   TU.Code = ModifiedContents.str();
   Inputs = TU.inputs(FS);
   auto PatchedAST = ParsedAST::build(testPath("foo.cpp"), Inputs, std::move(CI),
-                                     {}, EmptyPreamble, nullptr);
+                                     {}, EmptyPreamble);
   ASSERT_TRUE(PatchedAST);
   ASSERT_FALSE(PatchedAST->getDiagnostics());
 
@@ -612,7 +612,7 @@ TEST(ParsedASTTest, PatchesDeletedIncludes) {
   TU.Code = "";
   Inputs = TU.inputs(FS);
   auto PatchedAST = ParsedAST::build(testPath("foo.cpp"), Inputs, std::move(CI),
-                                     {}, BaselinePreamble, nullptr);
+                                     {}, BaselinePreamble);
   ASSERT_TRUE(PatchedAST);
 
   // Ensure source location information is correct.
