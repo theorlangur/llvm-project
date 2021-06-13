@@ -409,6 +409,12 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   const Config &Cfg = Config::current();
 
   auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
+  if (Inputs.DraftFS) {
+    IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
+        new llvm::vfs::OverlayFileSystem(VFS)); 
+    Overlay->pushOverlay(Inputs.DraftFS);      
+    VFS = Overlay;
+  }
   if (PCHAccess && *PCHAccess) 
   {
     Preamble = nullptr;
