@@ -177,6 +177,25 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
   };
   PCHOpts.WaitForInit = Opts.PCHAlwaysWait;
   PrecompiledHeaderMgr = std::make_unique<PCHManager>(CDB, TFS, *ParseCB, PCHOpts);
+  PCHWasBuild = PrecompiledHeaderMgr->watch([this](PCHManager::PCHEvent const &E) {
+	vlog("PCH was built: {0}; Success: {1}", E.PCHPath, E.Success);
+    if (!E.Success)
+      return;
+    reparseOpenFilesIfNeeded([&](StringRef File) -> bool {
+	  vlog("After PCH update: checking {0}", File);
+      auto Cmd = this->CDB.getCompileCommand(File);
+      if (Cmd) {
+	    //log("After PCH update: found command for {0}", File);
+        bool r = PrecompiledHeaderMgr->hasPCHInDependencies(*Cmd, E.PCHPath);
+        if (r) {
+          log("PCH {0} updated. Updating {1} that depends on it", E.PCHPath,
+              File);
+        }
+        return r;
+      }
+      return false;
+    });
+  });
 
   // Pass a callback into `WorkScheduler` to extract symbols from a newly
   // parsed file and rebuild the file index synchronously each time an AST
