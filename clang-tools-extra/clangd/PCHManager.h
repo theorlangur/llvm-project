@@ -76,7 +76,25 @@ private:
 };
 
 class PCHManager {
-  struct PCHItem;
+    using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
+    struct PCHItem
+    {
+      enum class State {Valid, Rebuild, Invalid};
+
+        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
+        unsigned invalidate(uniq_lck &Lock);
+
+        tooling::CompileCommand CompileCommand;
+        std::shared_ptr<std::string> PCHData;
+        std::vector<PCHItem*> DependOnMe;
+        std::vector<PCHItem*> IdependOn;
+        IncludeStructure Includes;
+        CanonicalIncludes CanonIncludes;
+        State ItemState = State::Rebuild;
+        int Version = 0;
+        mutable std::atomic<unsigned> InUse{0};
+        mutable std::condition_variable_any CV;
+    };
 public:
   struct Stats {
     unsigned Completed = 0; // PCHs generated
@@ -91,8 +109,12 @@ public:
   };
 
   using shared_lck = std::shared_lock<std::shared_timed_mutex>;
-  using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
   using UsedPCHDataList = std::vector<std::shared_ptr<std::string>>;
+  struct PCHEvent {
+    PathRef PCHPath;
+    bool Success;
+  };
+  using PCHBuiltEvent = Event<PCHEvent>;
 
   PCHManager(const GlobalCompilationDatabase &CDB, const ThreadsafeFS &TFS, ParsingCallbacks &Callbacks, const Options &Opts);
   ~PCHManager();
@@ -131,6 +153,12 @@ public:
   PCHAccess tryFindPCH(tooling::CompileCommand const& Cmd) const;
   PCHAccess tryFindPCH(clang::clangd::PathRef PCHFile) const;
 
+  bool hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRef PCHFile) const;
+
+  PCHBuiltEvent::Subscription watch(PCHBuiltEvent::Listener L) const {
+    return OnPCHBuilt.observe(std::move(L));
+  }
+
   private:
     void enqueue(const std::vector<std::string> &ChangedFiles, FSType FS) {
         Queue.push(changedFilesTask(ChangedFiles, FS));
@@ -153,25 +181,6 @@ public:
     unsigned invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles);
     void rebuildInvalidatedPCH(unsigned Tota, FSType FSl);
     void updateAllHeaders();
-
-    struct PCHItem
-    {
-      enum class State {Valid, Rebuild, Invalid};
-
-        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
-        unsigned invalidate(uniq_lck &Lock);
-
-        tooling::CompileCommand CompileCommand;
-        std::shared_ptr<std::string> PCHData;
-        std::vector<PCHItem*> DependOnMe;
-        std::vector<PCHItem*> IdependOn;
-        IncludeStructure Includes;
-        CanonicalIncludes CanonIncludes;
-        State ItemState = State::Rebuild;
-        int Version = 0;
-        mutable std::atomic<unsigned> InUse{0};
-        mutable std::condition_variable_any CV;
-    };
     void rebuildPCH(PCHItem &Item, FSType FS);
 
     static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, UsedPCHDataList &pchdatas);
@@ -207,6 +216,8 @@ public:
 
     unsigned Total=0;
     std::atomic<unsigned> Complete{0};
+
+    mutable PCHBuiltEvent OnPCHBuilt;
 };
 } // namespace clangd
 } // namespace clang
