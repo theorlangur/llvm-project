@@ -483,6 +483,7 @@ private:
   std::vector<std::unique_ptr<SymbolIndex>> MergedIdx;
   // If present, an index of symbols in open files. Read via *Index.
   std::unique_ptr<PCHManager> PrecompiledHeaderMgr;
+  PCHManager::PCHBuiltEvent::Subscription PCHWasBuild;
 
   // When set, provides clang-tidy options for a specific file.
   TidyProviderRef ClangTidyProvider;
