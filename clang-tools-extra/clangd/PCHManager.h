@@ -92,6 +92,7 @@ public:
 
   using shared_lck = std::shared_lock<std::shared_timed_mutex>;
   using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
+  using UsedPCHDataList = std::vector<std::shared_ptr<std::string>>;
 
   PCHManager(const GlobalCompilationDatabase &CDB, const ThreadsafeFS &TFS, ParsingCallbacks &Callbacks, const Options &Opts);
   ~PCHManager();
@@ -116,6 +117,7 @@ public:
     PCHAccess(const PCHItem *Item);
 
     const PCHItem *Item = nullptr;
+    mutable UsedPCHDataList UsedPCHDatas;
     friend class PCHManager;
   };
 
@@ -156,11 +158,11 @@ public:
     {
       enum class State {Valid, Rebuild, Invalid};
 
-        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)) {}
+        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
         unsigned invalidate(uniq_lck &Lock);
 
         tooling::CompileCommand CompileCommand;
-        std::string PCHData;
+        std::shared_ptr<std::string> PCHData;
         std::vector<PCHItem*> DependOnMe;
         std::vector<PCHItem*> IdependOn;
         IncludeStructure Includes;
@@ -172,7 +174,7 @@ public:
     };
     void rebuildPCH(PCHItem &Item, FSType FS);
 
-    static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS);
+    static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, UsedPCHDataList &pchdatas);
 
     using CDBWeak = std::weak_ptr<const tooling::CompilationDatabase>;
     using PCHItemList = std::vector<std::unique_ptr<PCHItem>>;

@@ -385,7 +385,6 @@ unsigned PCHManager::PCHItem::invalidate(uniq_lck &Lock) {
 
     ItemState = PCHItem::State::Rebuild;
     ++Version;
-    PCHData.clear();
     // all dependencies must be invalidated
     for (PCHItem *Dep : DependOnMe)
       Res += Dep->invalidate(Lock);
@@ -433,13 +432,20 @@ unsigned PCHManager::invalidateAffectedPCH(
 
 IntrusiveRefCntPtr<llvm::vfs::FileSystem>
 PCHManager::addDependencies(const PCHItem *Dep,
-                            IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS) {
+                            IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, 
+                            UsedPCHDataList &pchdatas) {
   IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS(
       new llvm::vfs::InMemoryFileSystem());
   while (Dep) {
-    auto Buf = llvm::MemoryBuffer::getMemBuffer(Dep->PCHData);
-    PCHFS->addFile(Dep->CompileCommand.Filename + ".pch", 0, std::move(Buf));
-    Dep = Dep->IdependOn.empty() ? nullptr : Dep->IdependOn[0];
+    auto data = Dep->PCHData;
+    if (data) {
+		pchdatas.emplace_back(data);
+		auto Buf = llvm::MemoryBuffer::getMemBuffer(*data);
+		PCHFS->addFile(Dep->CompileCommand.Filename + ".pch", 0, std::move(Buf));
+		Dep = Dep->IdependOn.empty() ? nullptr : Dep->IdependOn[0];
+    }else {
+      elog("(PCH) empty data on dependency {0}!!! (Status: {1})", Dep->CompileCommand.Filename, (int)Dep->ItemState);
+    }
   }
 
   IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
@@ -517,10 +523,12 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
     Overlay->pushOverlay(FS);                 // FS is secondary
     VFS = Overlay;
   }
+
+  UsedPCHDataList UsedPCHDatas;
   if (Dep) {
     PreprocessorOpts.ImplicitPCHInclude =
         std::string(Dep->CompileCommand.Filename) + ".pch";
-    VFS = addDependencies(Dep, VFS);
+    VFS = addDependencies(Dep, VFS, UsedPCHDatas);
   }
 
   CppFilePreambleCallbacks SerializedDeclsCollector(
@@ -600,8 +608,9 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   Clang->getLangOpts().CompilingPCH = true;
 
+  std::shared_ptr<std::string> newPCH = std::make_shared<std::string>();
   std::unique_ptr<PrecompilePCHAction> Act;
-  Act.reset(new PrecompilePCHAction(&Item.PCHData, Callbacks));
+  Act.reset(new PrecompilePCHAction(&*newPCH, Callbacks));
   Callbacks.BeforeExecute(*Clang);
   if (!Act->BeginSourceFile(*Clang.get(), Clang->getFrontendOpts().Inputs[0])) {
     elog("(PCH)Failed to start processing {0}", Item.CompileCommand.Filename);
@@ -634,9 +643,10 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   Item.Includes = SerializedDeclsCollector.takeIncludes();
   Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
+  Item.PCHData = newPCH;
   S = PCHItem::State::Valid;
   log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
-      Item.PCHData.size(), Item.CompileCommand.Filename, Item.Version);
+      Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
 }
 
 void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
@@ -705,8 +715,11 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
 
   for (const auto &I : PCHs) {
     if (I->CompileCommand.Filename == PCHFile) {
-      if (I->ItemState == PCHItem::State::Rebuild)
-        I->CV.wait(Lock, [&] { return I->ItemState != PCHItem::State::Rebuild; });
+      if (I->ItemState == PCHItem::State::Rebuild) {
+        auto data = I->PCHData;
+        if (data->empty())//if it's empty - we wait. If there's some old PCH - we use it right away to avoid delays
+			I->CV.wait(Lock, [&] { return I->ItemState != PCHItem::State::Rebuild; });
+      }
 
       if (I->ItemState == PCHItem::State::Invalid)
         return {};
@@ -729,7 +742,7 @@ bool PCHManager::PCHAccess::addPCH(
         DisableValidationForModuleKind::PCH;
     pp.ImplicitPCHInclude =
         std::string(Item->CompileCommand.Filename) + ".pch";
-    VFS = addDependencies(Item, VFS);
+    VFS = addDependencies(Item, VFS, UsedPCHDatas);
     return true;
   }
   return false;
@@ -740,7 +753,7 @@ PCHManager::PCHAccess::PCHAccess(const PCHItem *Item) : Item(Item) {
     ++Item->InUse;
 }
 
-PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : Item(Rhs.Item) {
+PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : Item(Rhs.Item), UsedPCHDatas(std::move(Rhs.UsedPCHDatas)) {
   Rhs.Item = nullptr;
 }
 PCHManager::PCHAccess::~PCHAccess() {
@@ -750,6 +763,7 @@ PCHManager::PCHAccess::~PCHAccess() {
 
 PCHManager::PCHAccess &PCHManager::PCHAccess::operator=(PCHAccess &&Rhs) {
   std::swap(Item, Rhs.Item);
+  UsedPCHDatas = std::move(Rhs.UsedPCHDatas);
   return *this;
 }
 
