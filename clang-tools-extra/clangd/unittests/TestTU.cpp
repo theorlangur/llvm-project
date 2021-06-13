@@ -127,7 +127,7 @@ ParsedAST TestTU::build() const {
                                                /*StoreInMemory=*/true,
                                                /*PreambleCallback=*/nullptr);
   auto AST = ParsedAST::build(testPath(Filename), Inputs, std::move(CI),
-                              Diags.take(), Preamble);
+                              Diags.take(), Preamble, {});
   if (!AST) {
     llvm::errs() << "Failed to build code:\n" << Code;
     std::abort();
