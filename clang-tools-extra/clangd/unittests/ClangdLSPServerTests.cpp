@@ -15,7 +15,6 @@
 #include "support/TestTracer.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
-#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Testing/Support/Error.h"
 #include "llvm/Testing/Support/SupportHelpers.h"
@@ -46,11 +45,6 @@ protected:
     // This is needed to we can test index-based operations like call hierarchy.
     Base.BuildDynamicSymbolIndex = true;
     Base.FeatureModules = &FeatureModules;
-    //Base.WorkspaceRoot = "/home/orlangur/myapps/cpp/dummy/";
-    //Base.ResourceDir = "/home/orlangur/myapps/cpp/cpp_indexer/build/llvm/Debug/lib/clang/13.0.0";
-    Base.WorkspaceRoot = "d:\\Develoing\\grandma_main\\gma3";
-    Base.ResourceDir = "d:\\Develoing\\cppindex\\cpp_indexer\\build\\llvm\\build\\MSVC\\Debug\\lib\\clang\\13.0.0";
-    Base.BackgroundIndex = false;
   }
 
   LSPClient &start() {
@@ -76,8 +70,7 @@ protected:
       stop();
   }
 
-  //MockFS FS;
-  RealThreadsafeFS FS;
+  MockFS FS;
   ClangdLSPServer::Options Opts;
   FeatureModuleSet FeatureModules;
 
@@ -146,7 +139,6 @@ TEST_F(LSPTest, Diagnostics) {
   EXPECT_THAT(Client.diagnostics("foo.cpp"), llvm::ValueIs(testing::IsEmpty()));
 }
 
-/*
 TEST_F(LSPTest, DiagnosticsHeaderSaved) {
   auto &Client = start();
   Client.didOpen("foo.cpp", R"cpp(
@@ -175,7 +167,6 @@ TEST_F(LSPTest, DiagnosticsHeaderSaved) {
               llvm::ValueIs(testing::ElementsAre(
                   diagMessage("Use of undeclared identifier 'changed'"))));
 }
-*/
 
 TEST_F(LSPTest, RecordsLatencies) {
   trace::TestTracer Tracer;
@@ -187,7 +178,6 @@ TEST_F(LSPTest, RecordsLatencies) {
   EXPECT_THAT(Tracer.takeMetric("lsp_latency", MethodName), testing::SizeIs(1));
 }
 
-/*
 TEST_F(LSPTest, IncomingCalls) {
   Annotations Code(R"cpp(
     void calle^e(int);
@@ -281,7 +271,6 @@ capture(std::optional<llvm::Expected<T>> &Out) {
   Out.reset();
   return [&Out](llvm::Expected<T> V) { Out.emplace(std::move(V)); };
 }
-*/
 
 TEST_F(LSPTest, FeatureModulesThreadingTest) {
   // A feature module that does its work on a background thread, and so
@@ -398,7 +387,7 @@ TEST_F(LSPTest, DiagModuleTest) {
   auto &Client = start();
   Client.didOpen("foo.cpp", "test;");
   EXPECT_THAT(Client.diagnostics("foo.cpp"),
-              llvm::ValueIs(testing::ElementsAre(diagMessage(DiagMsg))));
+              llvm::ValueIs(testing::ElementsAre(DiagMessage(DiagMsg))));
 }
 
 TEST_F(LSPTest, PCHTest) {
