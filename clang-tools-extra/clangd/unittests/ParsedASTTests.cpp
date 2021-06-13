@@ -389,7 +389,7 @@ TEST(ParsedASTTest, PatchesAdditionalIncludes) {
   TU.Code = ModifiedContents.str();
   Inputs = TU.inputs(FS);
   auto PatchedAST = ParsedAST::build(testPath("foo.cpp"), Inputs, std::move(CI),
-                                     {}, EmptyPreamble, nullptr);
+                                     {}, EmptyPreamble);
   ASSERT_TRUE(PatchedAST);
 
   // Ensure source location information is correct, including resolved paths.
@@ -433,7 +433,7 @@ TEST(ParsedASTTest, PatchesDeletedIncludes) {
   TU.Code = "";
   Inputs = TU.inputs(FS);
   auto PatchedAST = ParsedAST::build(testPath("foo.cpp"), Inputs, std::move(CI),
-                                     {}, BaselinePreamble, nullptr);
+                                     {}, BaselinePreamble);
   ASSERT_TRUE(PatchedAST);
 
   // Ensure source location information is correct.
