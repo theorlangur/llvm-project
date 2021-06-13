@@ -237,7 +237,7 @@ createPatchedAST(llvm::StringRef Baseline, llvm::StringRef Modified,
     return std::nullopt;
   }
   return ParsedAST::build(testPath(TU.Filename), TU.inputs(FS), std::move(CI),
-                          {}, BaselinePreamble, nullptr);
+                          {}, BaselinePreamble);
 }
 
 std::string getPreamblePatch(llvm::StringRef Baseline,

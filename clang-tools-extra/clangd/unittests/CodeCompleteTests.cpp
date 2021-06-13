@@ -134,7 +134,7 @@ CodeCompleteResult completions(const TestTU &TU, Position Point,
   }
   auto Preamble = buildPreamble(testPath(TU.Filename), *CI, Inputs,
                                 /*InMemory=*/true, /*Callback=*/nullptr);
-  return codeComplete(testPath(TU.Filename), Point, Preamble.get(), Inputs, {},
+  return codeComplete(testPath(TU.Filename), Point, Preamble.get(), Inputs,
                       Opts);
 }
 
@@ -166,7 +166,7 @@ CodeCompleteResult completionsNoCompile(llvm::StringRef Text,
   MockFS FS;
   Annotations Test(Text);
   ParseInputs ParseInput{tooling::CompileCommand(), &FS, Test.code().str()};
-  return codeComplete(FilePath, Test.point(), /*Preamble=*/nullptr, ParseInput, {},
+  return codeComplete(FilePath, Test.point(), /*Preamble=*/nullptr, ParseInput,
                       Opts);
 }
 
@@ -1369,7 +1369,7 @@ signatures(llvm::StringRef Text, Position Point,
     ADD_FAILURE() << "Couldn't build Preamble";
     return {};
   }
-  return signatureHelp(testPath(TU.Filename), Point, &*Preamble, Inputs, {}, DocumentationFormat);
+  return signatureHelp(testPath(TU.Filename), Point, *Preamble, Inputs, {}, DocumentationFormat);
 }
 
 SignatureHelp
@@ -1671,7 +1671,7 @@ TEST(SignatureHelpTest, StalePreamble) {
     void bar() { foo(^2); })cpp");
   TU.Code = Test.code().str();
   auto Results = signatureHelp(testPath(TU.Filename), Test.point(),
-                               &*EmptyPreamble, TU.inputs(FS), {}, MarkupKind::PlainText);
+                               *EmptyPreamble, TU.inputs(FS), {}, MarkupKind::PlainText);
   EXPECT_THAT(Results.signatures, ElementsAre(Sig("foo([[int x]]) -> int")));
   EXPECT_EQ(0, Results.activeSignature);
   EXPECT_EQ(0, Results.activeParameter);
