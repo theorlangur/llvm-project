@@ -338,6 +338,12 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
   Opts.PreambleParseForwardingFunctions = PreambleParseForwardingFunctions;
   Opts.ImportInsertions = ImportInsertions;
 
+  {
+    auto CC = CDB.getCompileCommand(File);
+    if (CC)
+		PrecompiledHeaderMgr->tryAddDynamicPCH(*CC, draftVFS);
+  }
+
   // Compile command is set asynchronously during update, as it can be slow.
   ParseInputs Inputs;
   Inputs.TFS = &getHeaderFS();
@@ -452,6 +458,11 @@ ClangdServer::createConfiguredContextProvider(const config::Provider *Provider,
 void ClangdServer::removeDocument(PathRef File) {
   DraftMgr.removeDraft(File);
   WorkScheduler->remove(File);
+  {
+    auto CC = CDB.getCompileCommand(File);
+    if (CC)
+		PrecompiledHeaderMgr->tryRemoveDynamicPCH(*CC);
+  }
 }
 
 void ClangdServer::codeComplete(PathRef File, Position Pos,
