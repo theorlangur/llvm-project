@@ -22,6 +22,7 @@
 #include <shared_mutex>
 #include <string>
 #include <utility>
+#include <numeric>
 
 namespace clang {
 namespace clangd {
@@ -587,6 +588,11 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   Inputs.Opts = std::move(Opts);
   Inputs.CompileCommand = *CC;
 
+  std::string CCCmdLine;
+  CCCmdLine = std::accumulate(CC->CommandLine.begin(), CC->CommandLine.end(), std::string(),
+                  [](std::string r, std::string arg) { return r + " " + arg; });
+  log("(PCH) cmdline for {0}:\n{1}", Item.CompileCommand.Filename, CCCmdLine);
+
   StoreDiags CompilerInvocationDiagConsumer;
   std::vector<std::string> CC1Args;
 
@@ -623,9 +629,12 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       Item.CompileCommand.Filename,
       [&](ASTContext &AST, std::shared_ptr<clang::Preprocessor> PP,
           const CanonicalIncludes &CanInc) {
-        // call Callback.onPreambleAST
-        Callbacks.onPreambleAST(Item.CompileCommand.Filename, std::to_string(Item.Version), AST,
-                                std::move(PP), CanInc);
+        if (!Item.Dynamic) {//no symbol updates from dynamic pchs, those are limited by definition
+          // call Callback.onPreambleAST
+          Callbacks.onPreambleAST(Item.CompileCommand.Filename,
+                                  std::to_string(Item.Version), AST,
+                                  std::move(PP), CanInc);
+        }
       });
   PreambleCallbacks &Callbacks = SerializedDeclsCollector;
   llvm::SmallString<32> AbsFileName(Item.CompileCommand.Filename);
