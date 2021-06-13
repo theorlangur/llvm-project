@@ -82,7 +82,7 @@ class PCHManager {
       enum class State {Valid, Rebuild, Invalid};
 
         PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
-        unsigned invalidate(uniq_lck &Lock);
+        unsigned invalidate(uniq_lck &Lock, bool WaitForNoUsage);
 
         tooling::CompileCommand CompileCommand;
         std::shared_ptr<std::string> PCHData;
@@ -92,6 +92,7 @@ class PCHManager {
         CanonicalIncludes CanonIncludes;
         State ItemState = State::Rebuild;
         int Version = 0;
+        bool Dynamic = false;
         mutable std::atomic<unsigned> InUse{0};
         mutable std::condition_variable_any CV;
     };
@@ -137,7 +138,9 @@ public:
     operator bool() const { return Item != nullptr; }
   private:
     PCHAccess(const PCHItem *Item);
+    PCHAccess(std::shared_ptr<PCHItem> ShItem);
 
+   std::shared_ptr<PCHItem> DynItem;
     const PCHItem *Item = nullptr;
     mutable UsedPCHDataList UsedPCHDatas;
     friend class PCHManager;
@@ -149,8 +152,10 @@ public:
 
   PCHAccess findPCH(tooling::CompileCommand const& Cmd) const;
   PCHAccess findPCH(clang::clangd::PathRef PCHFile) const;
+  PCHAccess findDynPCH(clang::clangd::PathRef PCHFile) const;
 
   PCHAccess tryFindPCH(tooling::CompileCommand const& Cmd) const;
+  PCHAccess tryFindDynPCH(tooling::CompileCommand const& Cmd) const;
   PCHAccess tryFindPCH(clang::clangd::PathRef PCHFile) const;
 
   bool hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRef PCHFile) const;
@@ -158,6 +163,9 @@ public:
   PCHBuiltEvent::Subscription watch(PCHBuiltEvent::Listener L) const {
     return OnPCHBuilt.observe(std::move(L));
   }
+
+  bool tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS);
+  bool tryRemoveDynamicPCH(tooling::CompileCommand const &Cmd);
 
   private:
     void enqueue(const std::vector<std::string> &ChangedFiles, FSType FS) {
@@ -187,6 +195,7 @@ public:
 
     using CDBWeak = std::weak_ptr<const tooling::CompilationDatabase>;
     using PCHItemList = std::vector<std::unique_ptr<PCHItem>>;
+    using PCHSharedItemMap = std::unordered_map<std::string, std::shared_ptr<PCHItem>>;
 
     const GlobalCompilationDatabase &CDB;
     const ThreadsafeFS &TFS;
@@ -203,6 +212,9 @@ public:
     PCHItemList PCHs;
     mutable std::shared_timed_mutex PCHLock;
     AsyncTaskRunner ThreadPool;
+
+    PCHSharedItemMap DynamicPCHs;
+    mutable std::shared_timed_mutex DynamicPCHLock;
 
     using clock_t = std::chrono::steady_clock;
     using time_point_t = std::chrono::time_point<clock_t>;
