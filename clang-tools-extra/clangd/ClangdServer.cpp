@@ -316,10 +316,12 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
   std::string ActualVersion = DraftMgr.addDraft(File, Version, Contents);
   ParseOptions Opts;
 
+  auto draftVFS = DraftMgr.asVFS();
+
   if (Existed && AfterChange)
   {
     //slow. needs to be done in bulk
-    PrecompiledHeaderMgr->checkChangedFile(File, DraftMgr.asVFS());
+    PrecompiledHeaderMgr->checkChangedFile(File, draftVFS);
   }
   Opts.PreambleParseForwardingFunctions = PreambleParseForwardingFunctions;
   Opts.ImportInsertions = ImportInsertions;
@@ -335,6 +337,7 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
   Inputs.ClangTidyProvider = ClangTidyProvider;
   Inputs.FeatureModules = FeatureModules;
   Inputs.ModulesManager = ModulesManager;
+  Inputs.DraftFS = draftVFS;
   bool NewFile = WorkScheduler->update(File, Inputs, WantDiags);
   // If we loaded Foo.h, we want to make sure Foo.cpp is indexed.
   if (NewFile && BackgroundIdx)
