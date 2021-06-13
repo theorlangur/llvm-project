@@ -462,6 +462,9 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       OnProgress(Stats{++Complete, Total});
     Item.ItemState = S;
     Item.CV.notify_all();
+	vlog("Broadcasting PCH was built: {0}; Success: {1}; (Subscribed: {2})", Item.CompileCommand.Filename, S == PCHItem::State::Valid, OnPCHBuilt.subscribed());
+    OnPCHBuilt.broadcast(
+        PCHEvent{Item.CompileCommand.Filename, S == PCHItem::State::Valid});
   });
 
   PCHItem *Dep = Item.IdependOn.empty() ? nullptr : Item.IdependOn[0];
@@ -686,6 +689,34 @@ PCHManager::tryFindPCH(clang::clangd::PathRef PCHFile) const {
     return {};
   }
   return findPCH(PCHFile);
+}
+
+bool PCHManager::hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRef PCHFile) const {
+  llvm::StringRef Dep = findPCHDependency(Cmd);
+  if (!Dep.empty()) {
+	  shared_lck Lock(PCHLock);
+	  log("(PCH) hasPCHInDependencies request for {0} (PCH in question: {1})", Cmd.Filename, PCHFile);
+
+	  for (const auto &I : PCHs) {
+            if (I->CompileCommand.Filename == Dep) {
+              if (I->CompileCommand.Filename == PCHFile)//reacting only on main
+              {
+				  log("(PCH) hasPCHInDependencies: found for {0} (PCH in question: {1})", Cmd.Filename, PCHFile);
+                return true;
+              }
+              /*
+              const PCHItem *pI = &*I;
+              while (pI) {
+                if (pI->CompileCommand.Filename == PCHFile) {
+                  return true;
+                }
+                pI = pI->IdependOn.empty() ? nullptr : pI->IdependOn[0];
+              }
+              */
+            }
+          }
+  }
+  return false;
 }
 
 PCHManager::PCHAccess
