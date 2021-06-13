@@ -449,7 +449,7 @@ public:
 
       if (CheckCompletion) {
         Position EndPos = offsetToPosition(Inputs.Contents, End);
-        auto CC = codeComplete(File, EndPos, Preamble.get(), Inputs, CCOpts);
+        auto CC = codeComplete(File, EndPos, Preamble.get(), Inputs, {}, CCOpts);
         vlog("    code completion: {0}",
              CC.Completions.empty() ? "<empty>" : CC.Completions[0].Name);
       }
