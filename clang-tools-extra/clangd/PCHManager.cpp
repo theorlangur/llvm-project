@@ -1,4 +1,5 @@
 #include "PCHManager.h"
+#include "CompileCommands.h"
 #include "Preamble.h"
 #include "TUScheduler.h"
 #include "support/Logger.h"
@@ -138,21 +139,22 @@ public:
     if (!ParsedCallback)
       return;
     trace::Span Tracer("Running PreambleCallback");
-    ParsedCallback(CI.getASTContext(), CI.getPreprocessorPtr(), CanonIncludes);
+    ParsedCallback(CI.getASTContext(), *CI.getPreprocessorPtr(), CanonIncludes);
   }
 
   void BeforeExecute(CompilerInstance &CI) override {
     CanonIncludes.addSystemHeadersMapping(CI.getLangOpts());
     LangOpts = &CI.getLangOpts();
     SourceMgr = &CI.getSourceManager();
+    Includes.collect(CI);
   }
 
-  std::unique_ptr<PPCallbacks> createPPCallbacks() override {
+  /*std::unique_ptr<PPCallbacks> createPPCallbacks() override {
     assert(SourceMgr && LangOpts &&
            "SourceMgr and LangOpts must be set at this point");
 
     return collectIncludeStructureCallback(*SourceMgr, &Includes);
-  }
+  }*/
 
 private:
   PathRef File;
@@ -627,13 +629,14 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   CppFilePreambleCallbacks SerializedDeclsCollector(
       Item.CompileCommand.Filename,
-      [&](ASTContext &AST, std::shared_ptr<clang::Preprocessor> PP,
+      [&](ASTContext &AST, clang::Preprocessor &PP,
           const CanonicalIncludes &CanInc) {
         if (!Item.Dynamic) {//no symbol updates from dynamic pchs, those are limited by definition
           // call Callback.onPreambleAST
           Callbacks.onPreambleAST(Item.CompileCommand.Filename,
-                                  std::to_string(Item.Version), AST,
-                                  std::move(PP), CanInc);
+                                  std::to_string(Item.Version), 
+                                  *Invocation, AST,
+                                  PP, CanInc);
         }
       });
   PreambleCallbacks &Callbacks = SerializedDeclsCollector;
