@@ -331,7 +331,7 @@ ClangdServer::~ClangdServer() {
 void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                llvm::StringRef Version,
                                WantDiagnostics WantDiags, bool ForceRebuild, bool AfterChange) {
-  bool Existed = DraftMgr.getDraft(File).hasValue();
+  bool Existed = DraftMgr.getDraft(File).has_value();
   std::string ActualVersion = DraftMgr.addDraft(File, Version, Contents);
   ParseOptions Opts;
 
@@ -500,7 +500,10 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
         SpecFuzzyFind->CachedReq = CachedCompletionFuzzyFindRequestByFile[File];
       }
     }
-    ParseInputs ParseInput{IP->Command, &getHeaderFS(), IP->Contents.str()};
+    ParseInputs ParseInput;
+    ParseInput.CompileCommand = IP->Command;
+    ParseInput.TFS = &getHeaderFS();
+    ParseInput.Contents = IP->Contents.str();
     // FIXME: Add traling new line if there is none at eof, workaround a crash,
     // see https://github.com/clangd/clangd/issues/332
     if (!IP->Contents.ends_with("\n"))
@@ -551,7 +554,10 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
     if (!PreambleData && !IP->PCH)
       return CB(error("Failed to parse includes"));
 
-    ParseInputs ParseInput{IP->Command, &getHeaderFS(), IP->Contents.str()};
+    ParseInputs ParseInput;
+    ParseInput.CompileCommand = IP->Command;
+    ParseInput.TFS = &getHeaderFS();
+    ParseInput.Contents = IP->Contents.str();
     // FIXME: Add traling new line if there is none at eof, workaround a crash,
     // see https://github.com/clangd/clangd/issues/332
     if (!IP->Contents.ends_with("\n"))

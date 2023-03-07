@@ -324,7 +324,7 @@ public:
       IgnoringDiagConsumer IgnoreDiags;
       auto Invocation = buildCompilerInvocation(Inputs, IgnoreDiags);
       Duration Val = Time([&] {
-        ParsedAST::build(File, Inputs, std::move(Invocation), {}, Preamble);
+        ParsedAST::build(File, Inputs, std::move(Invocation), {}, Preamble, nullptr);
       });
       vlog("    Measured {0} ==> {1}", Checks, Val);
       return Val;

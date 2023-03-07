@@ -2204,7 +2204,7 @@ CodeCompleteResult codeCompleteComment(PathRef FileName, unsigned Offset,
   // full patch.
   semaCodeComplete(
       std::make_unique<ParamNameCollector>(Options, ParamNames), Options,
-      {FileName, Offset, *Preamble,
+      {FileName, Offset, PCHManager::PCHAccess{}, Preamble,
        PreamblePatch::createFullPatch(FileName, ParseInput, *Preamble),
        ParseInput});
   if (ParamNames.empty())
@@ -2300,13 +2300,13 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
   Options.IncludeMacros = false;
   Options.IncludeCodePatterns = false;
   Options.IncludeBriefComments = false;
-  llvm::Optional<PreamblePatch> Patch = !Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
+  //llvm::Optional<PreamblePatch> Patch = !Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
   semaCodeComplete(
       std::make_unique<SignatureHelpCollector>(Options, DocumentationFormat,
                                                ParseInput.Index, Result),
       Options,
       {FileName, *Offset, std::move(PCH), Preamble,
-       PreamblePatch::createFullPatch(FileName, ParseInput, Preamble),
+       PreamblePatch::createFullPatch(FileName, ParseInput, *Preamble),
        ParseInput});
   return Result;
 }
