@@ -2093,7 +2093,9 @@ CompletionPrefix guessCompletionPrefix(llvm::StringRef Content,
 CodeCompleteResult codeCompleteComment(PathRef FileName, unsigned Offset,
                                        llvm::StringRef Prefix,
                                        const PreambleData *Preamble,
-                                       const ParseInputs &ParseInput) {
+                                       const ParseInputs &ParseInput,
+                                       PCHManager::PCHAccess PCH
+                                       ) {
   if (Preamble == nullptr) // Can't run without Sema.
     return CodeCompleteResult();
 
@@ -2107,7 +2109,7 @@ CodeCompleteResult codeCompleteComment(PathRef FileName, unsigned Offset,
   // full patch.
   semaCodeComplete(
       std::make_unique<ParamNameCollector>(Options, ParamNames), Options,
-      {FileName, Offset, PCHManager::PCHAccess{}, Preamble,
+      {FileName, Offset, std::move(PCH), Preamble,
        PreamblePatch::createFullPatch(FileName, ParseInput, *Preamble),
        ParseInput});
   if (ParamNames.empty())
@@ -2171,7 +2173,7 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
     // information we need and construct completion items ourselves.
     auto CommentPrefix = Content.substr(*OffsetBeforeComment + 2).trim();
     return codeCompleteComment(FileName, *OffsetBeforeComment, CommentPrefix,
-                               Preamble, ParseInput);
+                               Preamble, ParseInput, std::move(PCH));
   }
 
   auto Flow = CodeCompleteFlow(
