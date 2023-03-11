@@ -627,6 +627,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
     VFS = addDependencies(Dep, VFS, UsedPCHDatas);
   }
 
+  auto &Inv = *Invocation;
   CppFilePreambleCallbacks SerializedDeclsCollector(
       Item.CompileCommand.Filename,
       [&](ASTContext &AST, clang::Preprocessor &PP,
@@ -635,7 +636,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
           // call Callback.onPreambleAST
           Callbacks.onPreambleAST(Item.CompileCommand.Filename,
                                   std::to_string(Item.Version), 
-                                  *Invocation, AST,
+                                  Inv, AST,
                                   PP, CanInc);
         }
       });
@@ -707,6 +708,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       new SourceManager(*PreambleDiagsEngine, Clang->getFileManager()));
 
   Clang->getLangOpts().CompilingPCH = true;
+  Clang->createPreprocessor(TU_Prefix);
 
   std::shared_ptr<std::string> newPCH = std::make_shared<std::string>();
   std::unique_ptr<PrecompilePCHAction> Act;
