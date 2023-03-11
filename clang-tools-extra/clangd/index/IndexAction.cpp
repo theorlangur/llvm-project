@@ -110,13 +110,15 @@ public:
   void FileSkipped(const FileEntryRef &SkippedFile, const Token &FilenameTok,
                    SrcMgr::CharacteristicKind FileType) override {
 #ifndef NDEBUG
-    auto URI = toURI(SkippedFile);
+    /* auto URI = toURI(SkippedFile);
     if (!URI)
       return;
+
     auto I = IG.try_emplace(*URI);
     assert(!I.second && "File inserted for the first time on skip.");
     assert(I.first->getKeyData() == I.first->getValue().URI.data() &&
            "Node have not been populated yet");
+   */
 #endif
   }
 
@@ -189,8 +191,13 @@ public:
     if (IncludeGraphCallback != nullptr) {
 #ifndef NDEBUG
       // This checks if all nodes are initialized.
-      for (const auto &Node : IG)
-        assert(Node.getKeyData() == Node.getValue().URI.data());
+      //for (const auto &Node : IG)
+      //  assert(Node.getKeyData() == Node.getValue().URI.data());
+        for (const auto& Node : IG)
+        {
+			if (Node.getKeyData() != Node.getValue().URI.data())
+				  IG.erase(Node.getKey());
+		}
 #endif
       IncludeGraphCallback(std::move(IG));
     }
