@@ -2479,6 +2479,14 @@ Preprocessor::ImportAction Preprocessor::HandleHeaderIncludeOrImport(
                                   FilenameRange, File, SearchPath, RelativePath,
                                   SuggestedModule.getModule(), Action == Import,
                                   FileCharacter);
+    if (Action != Skip && File &&
+        !Callbacks->InclusionAllowed(
+            HashLoc, IncludeTok, LookupFilename, isAngled, FilenameRange, File,
+            SearchPath, RelativePath,
+            Action == Import ? SuggestedModule.getModule() : nullptr,
+            FileCharacter))
+      Action = Skip;
+
     if (Action == Skip && File)
       Callbacks->FileSkipped(*File, FilenameTok, FileCharacter);
   }
