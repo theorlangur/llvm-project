@@ -64,6 +64,31 @@ namespace clang {
 namespace clangd {
 namespace {
 
+class IgnoreDiagnosticsButErrors : public IgnoreDiagnostics {
+public:
+    void HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
+        const clang::Diagnostic& Info) override
+    {
+        if (DiagLevel == DiagnosticsEngine::Level::Error || DiagLevel == DiagnosticsEngine::Level::Fatal)
+        {
+		  llvm::SmallString<64> Message;
+		  Info.FormatDiagnostic(Message);
+
+		  llvm::SmallString<64> Location;
+		  if (Info.hasSourceManager() && Info.getLocation().isValid()) {
+			auto &SourceMgr = Info.getSourceManager();
+			auto Loc = SourceMgr.getFileLoc(Info.getLocation());
+			llvm::raw_svector_ostream OS(Location);
+			Loc.print(OS, SourceMgr);
+			OS << ":";
+		  }
+
+		  clangd::elog("Error diagnostic. {0}{1}", Location, Message);
+		}
+        IgnoreDiagnostics::HandleDiagnostic(DiagLevel, Info);
+    }
+};
+
 // We cannot use vfs->makeAbsolute because Cmd.FileName is either absolute or
 // relative to Cmd.Directory, which might not be the same as current working
 // directory.
@@ -277,7 +302,7 @@ llvm::Error BackgroundIndex::index(tooling::CompileCommand Cmd) {
   ParseInputs Inputs;
   Inputs.TFS = &TFS;
   Inputs.CompileCommand = std::move(Cmd);
-  IgnoreDiagnostics IgnoreDiags;
+  IgnoreDiagnosticsButErrors IgnoreDiags;
   auto CI = buildCompilerInvocation(Inputs, IgnoreDiags);
   if (!CI)
     return error("Couldn't build compiler invocation");
