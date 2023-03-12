@@ -174,6 +174,14 @@ public:
                                   bool ModuleImported,
                                   SrcMgr::CharacteristicKind FileType) {}
 
+  virtual bool InclusionAllowed(SourceLocation HashLoc,
+                                  const Token &IncludeTok, StringRef FileName,
+                                  bool IsAngled, CharSourceRange FilenameRange,
+                                  OptionalFileEntryRef File,
+                                  StringRef SearchPath, StringRef RelativePath,
+                                  const Module *Imported,
+                                SrcMgr::CharacteristicKind FileType) { return true; }
+
   /// Callback invoked whenever a submodule was entered.
   ///
   /// \param M The submodule we have entered.
@@ -533,6 +541,24 @@ public:
     Second->InclusionDirective(HashLoc, IncludeTok, FileName, IsAngled,
                                FilenameRange, File, SearchPath, RelativePath,
                                SuggestedModule, ModuleImported, FileType);
+  }
+
+  bool InclusionAllowed(SourceLocation HashLoc,
+                                  const Token &IncludeTok, StringRef FileName,
+                                  bool IsAngled, CharSourceRange FilenameRange,
+                                  OptionalFileEntryRef File,
+                                  StringRef SearchPath, StringRef RelativePath,
+                                  const Module *Imported,
+                                SrcMgr::CharacteristicKind FileType) override
+  { 
+    if (!First->InclusionAllowed(HashLoc, IncludeTok, FileName, IsAngled,
+                                 FilenameRange, File, SearchPath, RelativePath,
+                                 Imported, FileType))
+      return false;
+
+    return Second->InclusionAllowed(HashLoc, IncludeTok, FileName, IsAngled,
+                               FilenameRange, File, SearchPath, RelativePath,
+                               Imported, FileType);
   }
 
   void EnteredSubmodule(Module *M, SourceLocation ImportLoc,
