@@ -2281,8 +2281,9 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
                                               *ParseInput.TFS)
              : std::move(Flow).run({FileName, *Offset, std::move(PCH), Preamble,
                                     /*PreamblePatch=*/
-                                    PreamblePatch::createMacroPatch(
-                                        FileName, ParseInput, *Preamble),
+                                    Preamble ? PreamblePatch::createMacroPatch(
+                                              FileName, ParseInput, *Preamble)
+                                        : std::optional<PreamblePatch>{},
                                     ParseInput});
 }
 
@@ -2302,14 +2303,14 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
   Options.IncludeMacros = false;
   Options.IncludeCodePatterns = false;
   Options.IncludeBriefComments = false;
-  //llvm::Optional<PreamblePatch> Patch = !Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
+  std::optional<PreamblePatch> Patch =
+      !Preamble ? std::optional<PreamblePatch>{}
+			    :PreamblePatch::createFullPatch(FileName, ParseInput, *Preamble);
   semaCodeComplete(
       std::make_unique<SignatureHelpCollector>(Options, DocumentationFormat,
                                                ParseInput.Index, Result),
       Options,
-      {FileName, *Offset, std::move(PCH), Preamble,
-       PreamblePatch::createFullPatch(FileName, ParseInput, *Preamble),
-       ParseInput});
+      {FileName, *Offset, std::move(PCH), Preamble, Patch, ParseInput});
   return Result;
 }
 
