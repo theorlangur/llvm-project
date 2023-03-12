@@ -1373,7 +1373,7 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   // This is on-by-default in windows to allow parsing SDK headers; we're only
   // disabling it for the main-file (not preamble).
   CI->getLangOpts().DelayedTemplateParsing = false;
-  CI->getPreprocessorOpts().addMacroDef("_CLANGD_CODE_COMPLETE_");
+  //CI->getPreprocessorOpts().addMacroDef("_CLANGD_CODE_COMPLETE_");
   // Setup code completion.
   FrontendOpts.CodeCompleteOpts = Options;
   FrontendOpts.CodeCompletionAt.FileName = std::string(Input.FileName);
@@ -1419,21 +1419,6 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   {
     log("Applying PCH for code complete action for {0}. PCH: {1}", Input.FileName, Input.PCH.filename());
     Input.PCH.addPCH(CI.get(), VFS);
-    /*
-    auto &PreprocessorOpts = CI->getPreprocessorOpts();
-    PreprocessorOpts.PrecompiledPreambleBytes.first = 0;
-    PreprocessorOpts.PrecompiledPreambleBytes.second = false;
-    */
-    /*
-    PreambleBounds PreambleRegion = ComputePreambleBounds(*CI->getLangOpts(), *ContentsBuffer, 0);
-    auto &PreprocessorOpts = CI->getPreprocessorOpts();
-    PreprocessorOpts.PrecompiledPreambleBytes.first = PreambleRegion.Size;
-    PreprocessorOpts.PrecompiledPreambleBytes.second =
-        PreambleRegion.PreambleEndsAtStartOfLine;
-    PreprocessorOpts.DisablePCHOrModuleValidation =
-        DisableValidationForModuleKind::PCH;
-    log("semaCodeComplete: pch-preamble. bounds: sz: {0}; ends at start of line: {1}", PreambleRegion.Size, PreambleRegion.PreambleEndsAtStartOfLine);
-    */
   }
 
   const clang::PrecompiledPreamble *Prmbl = !CompletingInPreamble && Input.Preamble ? &Input.Preamble->Preamble : nullptr;
