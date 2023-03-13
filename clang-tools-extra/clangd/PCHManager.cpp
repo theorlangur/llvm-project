@@ -334,6 +334,19 @@ bool hasArgStr(const tooling::CompileCommand &CC, const char *pSubStr) {
   return false;
 }
 
+std::optional<StringRef> getArgVal(const tooling::CompileCommand &CC,
+                                   StringRef arg) {
+  for (const auto &a : CC.CommandLine) {
+    if (size_t i = a.find(arg); i != std::string::npos) {
+      i += arg.size();
+      if (a[i] == '=')
+        ++i;
+      return {StringRef(&a[i], a.size() - i)};
+    }
+  }
+  return {};
+}
+
 llvm::StringRef findDynamicPCH(const tooling::CompileCommand &CC) {
   auto beg = CC.CommandLine.begin();
   auto _end = CC.CommandLine.end();
@@ -552,9 +565,7 @@ PCHManager::addDependencies(const PCHItem *Dep,
   return Overlay;
 }
 
-class PPSkipIncludes: public PPCallbacks
-{
-  SourceManager &m_SourceManager;
+class PPSkipIncludes : public PPCallbacks {
   StringRef m_Target;
   bool m_SkipTarget;
 
@@ -562,37 +573,27 @@ class PPSkipIncludes: public PPCallbacks
   std::optional<FileEntryRef> m_TargetRef;
 
 public:
-    PPSkipIncludes(SourceManager& sm, StringRef target, bool skipTarget) : 
-        m_SourceManager(sm), m_Target(target), m_SkipTarget(skipTarget) {
+  PPSkipIncludes(SourceManager &sm, StringRef target, bool skipTarget)
+      : m_Target(target), m_SkipTarget(skipTarget) {
 
-        if (auto e = sm.getFileManager().getFileRef(m_Target))
-		  m_TargetRef = *e;
+    if (auto e = sm.getFileManager().getFileRef(m_Target))
+      m_TargetRef = *e;
   }
 
-  virtual bool InclusionAllowed(
-        SourceLocation HashLoc, const Token &IncludeTok, StringRef FileName,
-        bool IsAngled, CharSourceRange FilenameRange, OptionalFileEntryRef File,
-        StringRef SearchPath, StringRef RelativePath, const Module *Imported,
-        SrcMgr::CharacteristicKind FileType) override {
-    if (m_Skipped) {
-      //elog("Auto-Skipping include: {0}", FileName);
+  virtual bool InclusionAllowed(SourceLocation HashLoc, const Token &IncludeTok,
+                                StringRef FileName, bool IsAngled,
+                                CharSourceRange FilenameRange,
+                                OptionalFileEntryRef File, StringRef SearchPath,
+                                StringRef RelativePath, const Module *Imported,
+                                SrcMgr::CharacteristicKind FileType) override {
+    if (m_Skipped)
       return false;
+
+    if (m_TargetRef.has_value() && File.has_value() && *m_TargetRef == *File) {
+      m_Skipped = true;
+      return !m_SkipTarget;
     }
-
-    /* std::string pStr = FileName.str();
-    elog("inclusion allowed: {0}", pStr);
-    if (File.getPointer())
-    {
-		auto fn = File.getPointer()->getName();
-		elog("inclusion allowed file entry: {0}", fn);
-    }*/
-
-      if (m_TargetRef.has_value() && File.getPointer() && *m_TargetRef == *File )
-      {
-        m_Skipped = true;
-		return !m_SkipTarget;
-	  }
-      return true;
+    return true;
   }
 };
 
@@ -668,7 +669,17 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
     log("(PCH) using passed FS as overlay");
     IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
         new llvm::vfs::OverlayFileSystem(VFS)); // passed VFS is primary
-    Overlay->pushOverlay(FS);                 // FS is secondary
+
+    if (Item.Dynamic)
+    {
+	  IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DynamicFS(
+		  new llvm::vfs::InMemoryFileSystem());
+		auto Buf = llvm::MemoryBuffer::getMemBuffer("namespace{};");//bogus C++ content
+	  DynamicFS->addFile(Item.CompileCommand.Filename, 0, std::move(Buf));
+      Overlay->pushOverlay(DynamicFS);
+    }
+
+    Overlay->pushOverlay(FS);                 // FS is the last one
     VFS = Overlay;
   }
 
@@ -775,13 +786,11 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       Callbacks.createPPCallbacks();
   if (DelegatedPPCallbacks)
     Clang->getPreprocessor().addPPCallbacks(std::move(DelegatedPPCallbacks));
-  if (hasArgStr(Item.CompileCommand, "__CLANGD_DYNAMIC_PCH__"))
+  if (auto v = getArgVal(Inputs.CompileCommand, "__CLANGD_PCH_SKIP__"))
   {
-    bool codeCompletion =
-        hasArgStr(Item.CompileCommand, "_CLANGD_CODE_COMPLETE_");
     Clang->getPreprocessor().addPPCallbacks(
         std::unique_ptr<PPCallbacks>(
-            new PPSkipIncludes(Clang->getSourceManager(), Item.CompileCommand.CommandLine.back(), !codeCompletion)
+            new PPSkipIncludes(Clang->getSourceManager(), *v, true)
         ));
   }
 
@@ -1020,7 +1029,7 @@ PCHManager::PCHAccess::PCHAccess(const PCHItem *Item) : Item(Item) {
 }
 
 PCHManager::PCHAccess::PCHAccess(std::shared_ptr<PCHItem> ShItem)
-    : Item(ShItem.get()), DynItem(ShItem) {
+    : DynItem(ShItem), Item(ShItem.get()) {
   if (Item) {
     ++Item->InUse;
   }
