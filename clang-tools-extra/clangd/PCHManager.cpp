@@ -146,6 +146,10 @@ public:
     CanonIncludes.addSystemHeadersMapping(CI.getLangOpts());
     LangOpts = &CI.getLangOpts();
     SourceMgr = &CI.getSourceManager();
+  }
+
+  void InitiateIncludeCollection(CompilerInstance &CI)
+  {
     Includes.collect(CI);
   }
 
@@ -781,6 +785,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
     elog("(PCH)Failed to start processing {0}", Item.CompileCommand.Filename);
     return; // BuildPreambleError::BeginSourceFileFailed;
   }
+  SerializedDeclsCollector.InitiateIncludeCollection(*Clang);
 
   std::unique_ptr<PPCallbacks> DelegatedPPCallbacks =
       Callbacks.createPPCallbacks();
