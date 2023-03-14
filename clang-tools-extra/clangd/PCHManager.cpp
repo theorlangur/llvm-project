@@ -306,6 +306,14 @@ llvm::StringRef findPCHDependency(const tooling::CompileCommand &CC,
   auto _end = N != std::string::npos ? beg + N : CC.CommandLine.end();
   for (auto i = beg; i != _end; ++i) {
     const auto &Arg = *i;
+    if (Arg.find("__CLANGD_NO_PCH_DEP_NEXT__") != std::string::npos)
+    {
+      ++i;
+      if (i == _end)
+        break;
+
+      continue;
+    }
     size_t P = 0;
     while ((P = Arg.find("-include", P)) != std::string::npos) {
       if (!P || Arg[P - 1] == '-' ||
@@ -510,16 +518,21 @@ bool PCHManager::tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS)
       return true;
   }
 
+  auto CC = CDB.getCompileCommand(DynPCH);
+  if (CC.has_value())
+	  PCHDep = findPCHDependency(*CC);
+
   PCHAccess depAccess = findPCH(PCHDep);
-  if (!depAccess)
-    return false;
+  //if (!depAccess)
+  //  return false;
 
   {
     uniq_lck Lock(DynamicPCHLock);
     auto CC = Cmd;
     CC.Filename = DynPCH.str();//actual compile command must be provided in compile commands database
     auto Item = std::make_shared<PCHItem>(CC);
-    Item->IdependOn.push_back(const_cast<PCHItem*>(depAccess.Item));
+    if (depAccess)
+		Item->IdependOn.push_back(const_cast<PCHItem*>(depAccess.Item));
     Item->Dynamic = true;
     DynamicPCHs[Cmd.Filename] = Item;
     log("(DynPCH) added dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
@@ -583,6 +596,9 @@ public:
     if (auto e = sm.getFileManager().getFileRef(m_Target))
       m_TargetRef = *e;
   }
+
+  bool WasSkipped() const { return m_Skipped; }
+  StringRef GetTarget() const { return m_Target; }
 
   virtual bool InclusionAllowed(SourceLocation HashLoc, const Token &IncludeTok,
                                 StringRef FileName, bool IsAngled,
@@ -791,11 +807,12 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       Callbacks.createPPCallbacks();
   if (DelegatedPPCallbacks)
     Clang->getPreprocessor().addPPCallbacks(std::move(DelegatedPPCallbacks));
+  PPSkipIncludes *pPPSkipIncludes = nullptr;
   if (auto v = getArgVal(Inputs.CompileCommand, "__CLANGD_PCH_SKIP__"))
   {
     Clang->getPreprocessor().addPPCallbacks(
         std::unique_ptr<PPCallbacks>(
-            new PPSkipIncludes(Clang->getSourceManager(), *v, true)
+            pPPSkipIncludes = new PPSkipIncludes(Clang->getSourceManager(), *v, true)
         ));
   }
 
@@ -817,6 +834,11 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   if (!Act->hasEmittedPreamblePCH()) {
     elog("(PCH)Could not emmit PCH for {0} (Version: {1})", Item.CompileCommand.Filename, Item.Version);
     return;
+  }
+
+  if (pPPSkipIncludes && !pPPSkipIncludes->WasSkipped())
+  {
+    elog("(PCH)While generating {0} were expecting to skip {1} and further but didn't encounter", Item.CompileCommand.Filename, pPPSkipIncludes->GetTarget());
   }
 
   Item.Includes = SerializedDeclsCollector.takeIncludes();
