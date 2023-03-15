@@ -555,8 +555,9 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   llvm::DenseMap<diag::kind, DiagnosticsEngine::Level> OverriddenSeverity;
   // No need to run clang-tidy or IncludeFixerif we are not going to surface
   // diagnostics.
-  {
-    trace::Span Tracer("ClangTidyInit");
+  PPSkipIncludes *pPPSkipIncludes = PPSkipIncludes::CheckSkipIncludesArg(Inputs.CompileCommand, Clang.get());
+
+  {    trace::Span Tracer("ClangTidyInit");
     static const auto *AllCTFactories = [] {
       auto *CTFactories = new tidy::ClangTidyCheckFactories;
       for (const auto &E : tidy::ClangTidyModuleRegistry::entries())
@@ -642,6 +643,7 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
       }
       return DiagLevel;
     });
+
 
     // Add IncludeFixer which can recover diagnostics caused by missing includes
     // (e.g. incomplete type) and attach include insertion fixes to diagnostics.
@@ -754,6 +756,8 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   // CompilerInstance won't run this callback, do it directly.
   ASTDiags.EndSourceFile();
 
+  if (pPPSkipIncludes && !pPPSkipIncludes->WasSkipped())
+    elog("(ParsedAST)While analyzing {0} were expecting to skip {1} and further but didn't encounter", Inputs.CompileCommand.Filename, pPPSkipIncludes->GetTarget());
   std::vector<Diag> Diags = CompilerInvocationDiags;
   // FIXME: Also skip generation of diagnostics altogether to speed up ast
   // builds when we are patching a stale preamble.
