@@ -497,7 +497,7 @@ unsigned PCHManager::invalidateAffectedPCH(
       if (Item.ItemState == PCHItem::State::Rebuild)
         continue;
 
-      if (Item.IdependOn[0]->ItemState == PCHItem::State::Rebuild) {
+      if (!Item.IdependOn.empty() && Item.IdependOn[0]->ItemState == PCHItem::State::Rebuild) {
         Item.ItemState = PCHItem::State::Rebuild;
         ++Item.Version;
       }
@@ -507,9 +507,8 @@ unsigned PCHManager::invalidateAffectedPCH(
 }
 
 bool PCHManager::tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS) {
-  StringRef PCHDep = findPCHDependency(Cmd);
   StringRef DynPCH = findDynamicPCH(Cmd);
-  if ((DynPCH.empty() || PCHDep.empty()) || (DynPCH == PCHDep))
+  if (DynPCH.empty())
     return false;
 
   {
@@ -518,21 +517,23 @@ bool PCHManager::tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS)
       return true;
   }
 
+  StringRef PCHDep;
   auto CC = CDB.getCompileCommand(DynPCH);
   if (CC.has_value())
-	  PCHDep = findPCHDependency(*CC);
+    PCHDep = findPCHDependency(*CC);
 
   PCHAccess depAccess = findPCH(PCHDep);
-  //if (!depAccess)
-  //  return false;
+  // if (!depAccess)
+  //   return false;
 
   {
     uniq_lck Lock(DynamicPCHLock);
     auto CC = Cmd;
-    CC.Filename = DynPCH.str();//actual compile command must be provided in compile commands database
+    CC.Filename = DynPCH.str(); // actual compile command must be provided in
+                                // compile commands database
     auto Item = std::make_shared<PCHItem>(CC);
     if (depAccess)
-		Item->IdependOn.push_back(const_cast<PCHItem*>(depAccess.Item));
+      Item->IdependOn.push_back(const_cast<PCHItem *>(depAccess.Item));
     Item->Dynamic = true;
     DynamicPCHs[Cmd.Filename] = Item;
     log("(DynPCH) added dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
@@ -557,12 +558,21 @@ bool PCHManager::tryRemoveDynamicPCH(tooling::CompileCommand const &Cmd) {
   return false;
 }
 
+void PCHManager::addDynamicGhost(const PCHItem* Dep, IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS)
+{
+    auto Buf = llvm::MemoryBuffer::getMemBuffer(
+        "\nnamespace{};\n"); // bogus C++ content
+    MemFS->addFile(Dep->CompileCommand.Filename, 0, std::move(Buf));
+}
+
 IntrusiveRefCntPtr<llvm::vfs::FileSystem>
 PCHManager::addDependencies(const PCHItem *Dep,
                             IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, 
                             UsedPCHDataList &pchdatas) {
   IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS(
       new llvm::vfs::InMemoryFileSystem());
+  if (Dep->Dynamic)
+    addDynamicGhost(Dep, PCHFS);
   while (Dep) {
     auto data = std::atomic_load(&Dep->PCHData);
     if (data) {
@@ -695,8 +705,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
     {
 	  IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DynamicFS(
 		  new llvm::vfs::InMemoryFileSystem());
-		auto Buf = llvm::MemoryBuffer::getMemBuffer("namespace{};");//bogus C++ content
-	  DynamicFS->addFile(Item.CompileCommand.Filename, 0, std::move(Buf));
+      addDynamicGhost(&Item, DynamicFS);
       Overlay->pushOverlay(DynamicFS);
     }
 
@@ -947,12 +956,6 @@ bool PCHManager::hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRe
 
 PCHManager::PCHAccess
 PCHManager::findPCH(tooling::CompileCommand const &Cmd) const {
-  // return {};
-  /* if (llvm::StringRef(Cmd.Filename).endswith(".h"))
-  {
-    log("(findPCH) turned off for headers. {0}", Cmd.Filename);
-    return {};
-  }*/
   StringRef DynPCH = findDynamicPCH(Cmd);
   if (!DynPCH.empty()) {
     auto pchAccess = findDynPCH(DynPCH);
@@ -1034,6 +1037,7 @@ bool PCHManager::PCHAccess::addPCH(
     pp.AllowPCHWithCompilerErrors = true;
     pp.DisablePCHOrModuleValidation =
         DisableValidationForModuleKind::PCH;
+    pp.UsePredefines = false;
     pp.ImplicitPCHInclude =
         std::string(Item->CompileCommand.Filename) + ".pch";
     VFS = addDependencies(Item, VFS, UsedPCHDatas);
