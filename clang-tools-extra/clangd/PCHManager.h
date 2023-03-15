@@ -231,6 +231,29 @@ public:
 
     mutable PCHBuiltEvent OnPCHBuilt;
 };
+
+class PPSkipIncludes : public PPCallbacks {
+    StringRef m_Target;
+    bool m_SkipTarget;
+
+    bool m_Skipped = false;
+    std::optional<FileEntryRef> m_TargetRef;
+
+  public:
+    PPSkipIncludes(SourceManager &sm, StringRef target, bool skipTarget);
+    bool WasSkipped() const { return m_Skipped; }
+    StringRef GetTarget() const { return m_Target; }
+
+    virtual bool InclusionAllowed(SourceLocation HashLoc,
+                                  const Token &IncludeTok, StringRef FileName,
+                                  bool IsAngled, CharSourceRange FilenameRange,
+                                  OptionalFileEntryRef File,
+                                  StringRef SearchPath, StringRef RelativePath,
+                                  const Module *Imported,
+                                  SrcMgr::CharacteristicKind FileType) override;
+    static PPSkipIncludes *CheckSkipIncludesArg(const tooling::CompileCommand &CC, clang::CompilerInstance *pCI);
+};
+
 } // namespace clangd
 } // namespace clang
 

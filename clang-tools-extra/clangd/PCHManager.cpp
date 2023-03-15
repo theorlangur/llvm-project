@@ -582,40 +582,41 @@ PCHManager::addDependencies(const PCHItem *Dep,
   return Overlay;
 }
 
-class PPSkipIncludes : public PPCallbacks {
-  StringRef m_Target;
-  bool m_SkipTarget;
+PPSkipIncludes::PPSkipIncludes(SourceManager &sm, StringRef target, bool skipTarget)
+  : m_Target(target), m_SkipTarget(skipTarget) {
 
-  bool m_Skipped = false;
-  std::optional<FileEntryRef> m_TargetRef;
+if (auto e = sm.getFileManager().getFileRef(m_Target))
+  m_TargetRef = *e;
+}
 
-public:
-  PPSkipIncludes(SourceManager &sm, StringRef target, bool skipTarget)
-      : m_Target(target), m_SkipTarget(skipTarget) {
+bool PPSkipIncludes::InclusionAllowed(SourceLocation HashLoc, const Token &IncludeTok,
+							StringRef FileName, bool IsAngled,
+							CharSourceRange FilenameRange,
+							OptionalFileEntryRef File, StringRef SearchPath,
+							StringRef RelativePath, const Module *Imported,
+							SrcMgr::CharacteristicKind FileType) {
+if (m_Skipped)
+  return false;
 
-    if (auto e = sm.getFileManager().getFileRef(m_Target))
-      m_TargetRef = *e;
+if (m_TargetRef.has_value() && File.has_value() && *m_TargetRef == *File) {
+  m_Skipped = true;
+  return !m_SkipTarget;
+}
+return true;
+}
+
+PPSkipIncludes* PPSkipIncludes::CheckSkipIncludesArg(const tooling::CompileCommand& CC, clang::CompilerInstance* pCI)
+{
+  PPSkipIncludes *pPPSkipIncludes = nullptr;
+  if (auto v = getArgVal(CC, "__CLANGD_PCH_SKIP__"))
+  {
+	pCI->getPreprocessor().addPPCallbacks(
+		std::unique_ptr<PPCallbacks>(
+			pPPSkipIncludes = new PPSkipIncludes(pCI->getSourceManager(), *v, true)
+		));
   }
-
-  bool WasSkipped() const { return m_Skipped; }
-  StringRef GetTarget() const { return m_Target; }
-
-  virtual bool InclusionAllowed(SourceLocation HashLoc, const Token &IncludeTok,
-                                StringRef FileName, bool IsAngled,
-                                CharSourceRange FilenameRange,
-                                OptionalFileEntryRef File, StringRef SearchPath,
-                                StringRef RelativePath, const Module *Imported,
-                                SrcMgr::CharacteristicKind FileType) override {
-    if (m_Skipped)
-      return false;
-
-    if (m_TargetRef.has_value() && File.has_value() && *m_TargetRef == *File) {
-      m_Skipped = true;
-      return !m_SkipTarget;
-    }
-    return true;
-  }
-};
+  return pPPSkipIncludes;
+}
 
 void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   auto S = PCHItem::State::Invalid;
@@ -807,14 +808,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       Callbacks.createPPCallbacks();
   if (DelegatedPPCallbacks)
     Clang->getPreprocessor().addPPCallbacks(std::move(DelegatedPPCallbacks));
-  PPSkipIncludes *pPPSkipIncludes = nullptr;
-  if (auto v = getArgVal(Inputs.CompileCommand, "__CLANGD_PCH_SKIP__"))
-  {
-    Clang->getPreprocessor().addPPCallbacks(
-        std::unique_ptr<PPCallbacks>(
-            pPPSkipIncludes = new PPSkipIncludes(Clang->getSourceManager(), *v, true)
-        ));
-  }
+  PPSkipIncludes *pPPSkipIncludes = PPSkipIncludes::CheckSkipIncludesArg(Inputs.CompileCommand, Clang.get());
 
   if (auto *CommentHandler = Callbacks.getCommentHandler())
     Clang->getPreprocessor().addCommentHandler(CommentHandler);
@@ -837,9 +831,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   }
 
   if (pPPSkipIncludes && !pPPSkipIncludes->WasSkipped())
-  {
     elog("(PCH)While generating {0} were expecting to skip {1} and further but didn't encounter", Item.CompileCommand.Filename, pPPSkipIncludes->GetTarget());
-  }
 
   Item.Includes = SerializedDeclsCollector.takeIncludes();
   Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
