@@ -192,6 +192,7 @@ public:
     void rebuildPCH(PCHItem &Item, FSType FS);
 
     static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, UsedPCHDataList &pchdatas);
+    static void addDynamicGhost(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS);
 
     using CDBWeak = std::weak_ptr<const tooling::CompilationDatabase>;
     using PCHItemList = std::vector<std::unique_ptr<PCHItem>>;
