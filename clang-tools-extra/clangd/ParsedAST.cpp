@@ -487,7 +487,6 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   llvm::DenseMap<diag::kind, DiagnosticsEngine::Level> OverriddenSeverity;
   // No need to run clang-tidy or IncludeFixerif we are not going to surface
   // diagnostics.
-  PPSkipIncludes *pPPSkipIncludes = PPSkipIncludes::CheckSkipIncludesArg(Inputs.CompileCommand, Clang.get());
 
   if (PreserveDiags) {
     trace::Span Tracer("ClangTidyInit");
@@ -683,9 +682,6 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   Clang->getDiagnostics().setClient(new IgnoreDiagnostics);
   // CompilerInstance won't run this callback, do it directly.
   ASTDiags.EndSourceFile();
-
-  if (pPPSkipIncludes && !pPPSkipIncludes->WasSkipped())
-    elog("(ParsedAST)While analyzing {0} were expecting to skip {1} and further but didn't encounter", Inputs.CompileCommand.Filename, pPPSkipIncludes->GetTarget());
 
   std::optional<std::vector<Diag>> Diags;
   // FIXME: Also skip generation of diagnostics alltogether to speed up ast
