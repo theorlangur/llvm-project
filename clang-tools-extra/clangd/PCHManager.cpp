@@ -455,16 +455,16 @@ unsigned PCHManager::PCHItem::invalidate(uniq_lck &Lock, bool WaitForNoUsage) {
 unsigned PCHManager::invalidateAffectedPCH(
     const std::vector<std::string> &ChangedFiles) {
   unsigned Invalidated = 0;
+  llvm::StringSet<> ChangedU;
+  llvm::StringSet<> ChangedL;
+  for (auto S : ChangedFiles) {
+    S[0] = std::toupper(S[0]);
+    ChangedU.insert(S);
+    S[0] = std::tolower(S[0]);
+    ChangedL.insert(S);
+  }
   {
     uniq_lck ExclusiveAccessToPCH(PCHLock);
-    llvm::StringSet<> ChangedU;
-    llvm::StringSet<> ChangedL;
-    for (auto S : ChangedFiles) {
-      S[0] = std::toupper(S[0]);
-      ChangedU.insert(S);
-      S[0] = std::tolower(S[0]);
-      ChangedL.insert(S);
-    }
     for (auto &UI : PCHs) {
       PCHItem &Item = *UI;
       if (Item.ItemState == PCHItem::State::Rebuild)
@@ -491,6 +491,7 @@ unsigned PCHManager::invalidateAffectedPCH(
   }
 
   {
+    uniq_lck dummyLock;
     shared_lck DynLock(DynamicPCHLock);
     for (auto &I : DynamicPCHs) {
       PCHItem &Item = *I.second;
@@ -500,6 +501,18 @@ unsigned PCHManager::invalidateAffectedPCH(
       if (!Item.IdependOn.empty() && Item.IdependOn[0]->ItemState == PCHItem::State::Rebuild) {
         Item.ItemState = PCHItem::State::Rebuild;
         ++Item.Version;
+      }
+      else
+      {
+          for (auto const& h : Item.DynamicIncludes)
+          {
+			if (ChangedU.contains(h.getKey()) || ChangedL.contains(h.getKey())) {
+			  log("(DynPCH) invalidating {0} and all dependendents because"
+				  " of the included (possible indirectly) {1} has changed",
+				  Item.CompileCommand.Filename, h.getKey());
+			  Invalidated += Item.invalidate(dummyLock, false);//don't have to wait due to shared_ptr model of PCHData
+			}
+		  }
       }
     }
   }
@@ -610,9 +623,13 @@ if (m_Skipped)
 
 if (m_TargetRef.has_value() && File.has_value() && *m_TargetRef == *File) {
   m_Skipped = true;
+  if (!m_SkipTarget)
+	  m_AllowedIncludes.insert((*File).getFileEntry().tryGetRealPathName().str());
   return !m_SkipTarget;
 }
-return true;
+if (File.has_value())
+	  m_AllowedIncludes.insert((*File).getFileEntry().tryGetRealPathName().str());
+  return true;
 }
 
 PPSkipIncludes* PPSkipIncludes::CheckSkipIncludesArg(const tooling::CompileCommand& CC, clang::CompilerInstance* pCI)
@@ -641,18 +658,19 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   PCHItem *Dep = Item.IdependOn.empty() ? nullptr : Item.IdependOn[0];
   if (Dep && Dep->ItemState == PCHItem::State::Rebuild) {
-    elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
-         "in rebuild state",
-         Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
-    
-    shared_lck Lock(PCHLock);
-    Dep->CV.wait(Lock, [&] { return Dep->ItemState != PCHItem::State::Rebuild; });
+        elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
+             "in rebuild state",
+             Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
+
+        shared_lck Lock(PCHLock);
+        Dep->CV.wait(Lock,
+                     [&] { return Dep->ItemState != PCHItem::State::Rebuild; });
   }
   if (Dep && Dep->ItemState != PCHItem::State::Valid) {
-    elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
-         "invalid",
-         Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
-    return;
+        elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
+             "invalid",
+             Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
+        return;
   }
   ParseOptions Opts;
 
@@ -665,9 +683,9 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   auto CC = CDB.getCompileCommand(Item.CompileCommand.Filename);
   if (!CC) {
-    elog("(PCH)Failed to get compile command for {0}",
-         Item.CompileCommand.Filename);
-    return;
+        elog("(PCH)Failed to get compile command for {0}",
+             Item.CompileCommand.Filename);
+        return;
   }
 
   Inputs.ForceRebuild = true;
@@ -675,8 +693,9 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   Inputs.CompileCommand = *CC;
 
   std::string CCCmdLine;
-  CCCmdLine = std::accumulate(CC->CommandLine.begin(), CC->CommandLine.end(), std::string(),
-                  [](std::string r, std::string arg) { return r + " " + arg; });
+  CCCmdLine = std::accumulate(
+      CC->CommandLine.begin(), CC->CommandLine.end(), std::string(),
+      [](std::string r, std::string arg) { return r + " " + arg; });
   log("(PCH) cmdline for {0}:\n{1}", Item.CompileCommand.Filename, CCCmdLine);
 
   StoreDiags CompilerInvocationDiagConsumer;
@@ -685,7 +704,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   std::unique_ptr<CompilerInvocation> Invocation =
       buildCompilerInvocation(Inputs, CompilerInvocationDiagConsumer, &CC1Args);
   if (!CC1Args.empty())
-    log("(PCH)Driver produced command: cc1 {0}", printArgv(CC1Args));
+        log("(PCH)Driver produced command: cc1 {0}", printArgv(CC1Args));
 
   auto &PreprocessorOpts = Invocation->getPreprocessorOpts();
   PreprocessorOpts.PrecompiledPreambleBytes.first = 0;
@@ -693,31 +712,30 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   PreprocessorOpts.DisablePCHOrModuleValidation =
       DisableValidationForModuleKind::PCH;
   PreprocessorOpts.WriteCommentListToPCH = false;
-  //PreprocessorOpts.GeneratePreamble = true;
+  // PreprocessorOpts.GeneratePreamble = true;
 
   auto VFS = TFS.view(Item.CompileCommand.Directory);
   if (FS) {
-    log("(PCH) using passed FS as overlay");
-    IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
-        new llvm::vfs::OverlayFileSystem(VFS)); // passed VFS is primary
+        log("(PCH) using passed FS as overlay");
+        IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
+            new llvm::vfs::OverlayFileSystem(VFS)); // passed VFS is primary
 
-    if (Item.Dynamic)
-    {
-	  IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DynamicFS(
-		  new llvm::vfs::InMemoryFileSystem());
+        if (Item.Dynamic) {
+      IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DynamicFS(
+          new llvm::vfs::InMemoryFileSystem());
       addDynamicGhost(&Item, DynamicFS);
       Overlay->pushOverlay(DynamicFS);
-    }
+        }
 
-    Overlay->pushOverlay(FS);                 // FS is the last one
-    VFS = Overlay;
+        Overlay->pushOverlay(FS); // FS is the last one
+        VFS = Overlay;
   }
 
   UsedPCHDataList UsedPCHDatas;
   if (Dep) {
-    PreprocessorOpts.ImplicitPCHInclude =
-        std::string(Dep->CompileCommand.Filename) + ".pch";
-    VFS = addDependencies(Dep, VFS, UsedPCHDatas);
+        PreprocessorOpts.ImplicitPCHInclude =
+            std::string(Dep->CompileCommand.Filename) + ".pch";
+        VFS = addDependencies(Dep, VFS, UsedPCHDatas);
   }
 
   auto &Inv = *Invocation;
@@ -725,12 +743,12 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
       Item.CompileCommand.Filename,
       [&](ASTContext &AST, clang::Preprocessor &PP,
           const CanonicalIncludes &CanInc) {
-        if (!Item.Dynamic) {//no symbol updates from dynamic pchs, those are limited by definition
+        if (!Item.Dynamic) { // no symbol updates from dynamic pchs, those are
+                             // limited by definition
           // call Callback.onPreambleAST
           Callbacks.onPreambleAST(Item.CompileCommand.Filename,
-                                  std::to_string(Item.Version), 
-                                  Inv, AST,
-                                  PP, CanInc);
+                                  std::to_string(Item.Version), Inv, AST, PP,
+                                  CanInc);
         }
       });
   PreambleCallbacks &Callbacks = SerializedDeclsCollector;
@@ -741,14 +759,14 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   FrontendOptions &FrontendOpts = Invocation->getFrontendOpts();
   FrontendOpts.ProgramAction = frontend::GeneratePCH;
   FrontendOpts.SkipFunctionBodies = true;
-  //FrontendOpts.OutputFile = "__in__memory___";
+  // FrontendOpts.OutputFile = "__in__memory___";
 
   std::vector<std::unique_ptr<FeatureModule::ASTListener>> ASTListeners;
   if (Inputs.FeatureModules) {
-    for (auto &M : *Inputs.FeatureModules) {
+        for (auto &M : *Inputs.FeatureModules) {
       if (auto Listener = M.astListeners())
         ASTListeners.emplace_back(std::move(Listener));
-    }
+        }
   }
   StoreDiags PreambleDiagnostics;
   PreambleDiagnostics.setDiagCallback(
@@ -779,9 +797,9 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   Clang->setInvocation(std::move(Invocation));
   Clang->setDiagnostics(&*PreambleDiagsEngine);
   if (!Clang->createTarget()) {
-    elog("(PCH)Failed to create clang traget for {0}",
-         Item.CompileCommand.Filename);
-    return; // BuildPreambleError::CouldntCreateTargetInfo;
+        elog("(PCH)Failed to create clang traget for {0}",
+             Item.CompileCommand.Filename);
+        return; // BuildPreambleError::CouldntCreateTargetInfo;
   }
 
   if (Clang->getFrontendOpts().Inputs.size() != 1 ||
@@ -789,8 +807,8 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
           InputKind::Source ||
       Clang->getFrontendOpts().Inputs[0].getKind().getLanguage() ==
           Language::LLVM_IR) {
-    elog("(PCH)Bad inputs for {0}", Item.CompileCommand.Filename);
-    return; // BuildPreambleError::BadInputs;
+        elog("(PCH)Bad inputs for {0}", Item.CompileCommand.Filename);
+        return; // BuildPreambleError::BadInputs;
   }
 
   // Create a file manager object to provide access to and cache the filesystem.
@@ -808,25 +826,28 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   Act.reset(new PrecompilePCHAction(&*newPCH, Callbacks));
   Callbacks.BeforeExecute(*Clang);
   if (!Act->BeginSourceFile(*Clang.get(), Clang->getFrontendOpts().Inputs[0])) {
-    elog("(PCH)Failed to start processing {0}", Item.CompileCommand.Filename);
-    return; // BuildPreambleError::BeginSourceFileFailed;
+        elog("(PCH)Failed to start processing {0}",
+             Item.CompileCommand.Filename);
+        return; // BuildPreambleError::BeginSourceFileFailed;
   }
   SerializedDeclsCollector.InitiateIncludeCollection(*Clang);
 
   std::unique_ptr<PPCallbacks> DelegatedPPCallbacks =
       Callbacks.createPPCallbacks();
   if (DelegatedPPCallbacks)
-    Clang->getPreprocessor().addPPCallbacks(std::move(DelegatedPPCallbacks));
-  PPSkipIncludes *pPPSkipIncludes = PPSkipIncludes::CheckSkipIncludesArg(Inputs.CompileCommand, Clang.get());
+        Clang->getPreprocessor().addPPCallbacks(
+            std::move(DelegatedPPCallbacks));
+  PPSkipIncludes *pPPSkipIncludes =
+      PPSkipIncludes::CheckSkipIncludesArg(Inputs.CompileCommand, Clang.get());
 
   if (auto *CommentHandler = Callbacks.getCommentHandler())
-    Clang->getPreprocessor().addCommentHandler(CommentHandler);
+        Clang->getPreprocessor().addCommentHandler(CommentHandler);
 
   if (llvm::Error Err = Act->Execute()) {
-    elog("(PCH)Failure while executing clang for {0}: {1}",
-         Item.CompileCommand.Filename,
-         errorToErrorCode(std::move(Err)).message());
-    return;
+        elog("(PCH)Failure while executing clang for {0}: {1}",
+             Item.CompileCommand.Filename,
+             errorToErrorCode(std::move(Err)).message());
+        return;
   }
 
   // Run the callbacks.
@@ -835,15 +856,21 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   Act->EndSourceFile();
 
   if (!Act->hasEmittedPreamblePCH()) {
-    elog("(PCH)Could not emmit PCH for {0} (Version: {1})", Item.CompileCommand.Filename, Item.Version);
-    return;
+        elog("(PCH)Could not emmit PCH for {0} (Version: {1})",
+             Item.CompileCommand.Filename, Item.Version);
+        return;
   }
 
   if (pPPSkipIncludes && !pPPSkipIncludes->WasSkipped())
-    elog("(PCH)While generating {0} were expecting to skip {1} and further but didn't encounter", Item.CompileCommand.Filename, pPPSkipIncludes->GetTarget());
+        elog("(PCH)While generating {0} were expecting to skip {1} and further "
+             "but didn't encounter",
+             Item.CompileCommand.Filename, pPPSkipIncludes->GetTarget());
 
   Item.Includes = SerializedDeclsCollector.takeIncludes();
   Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
+
+  if (Item.Dynamic && pPPSkipIncludes)
+      Item.DynamicIncludes = pPPSkipIncludes->takeAllowedIncludes();
   std::atomic_store(&Item.PCHData, newPCH);
   S = PCHItem::State::Valid;
   log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
