@@ -93,6 +93,7 @@ class PCHManager {
         State ItemState = State::Rebuild;
         int Version = 0;
         bool Dynamic = false;
+        llvm::StringSet<> DynamicIncludes;
         mutable std::atomic<unsigned> InUse{0};
         mutable std::condition_variable_any CV;
     };
@@ -239,11 +240,13 @@ class PPSkipIncludes : public PPCallbacks {
 
     bool m_Skipped = false;
     std::optional<FileEntryRef> m_TargetRef;
+    llvm::StringSet<> m_AllowedIncludes;
 
   public:
     PPSkipIncludes(SourceManager &sm, StringRef target, bool skipTarget);
     bool WasSkipped() const { return m_Skipped; }
     StringRef GetTarget() const { return m_Target; }
+    llvm::StringSet<> takeAllowedIncludes() { return std::move(m_AllowedIncludes); }
 
     virtual bool InclusionAllowed(SourceLocation HashLoc,
                                   const Token &IncludeTok, StringRef FileName,
