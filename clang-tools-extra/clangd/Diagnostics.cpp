@@ -682,6 +682,14 @@ void StoreDiags::HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
     return;
   }
 
+  if (Info.getID() == diag::err_fe_ast_file_modified)
+  {
+      //remember that
+      m_ModifiedASTFile = Info.getArgStdStr(0);
+      elog("Encountered 'AST file modified' failuer. Remembering file in question: {0}", m_ModifiedASTFile);
+  }
+
+
   DiagnosticConsumer::HandleDiagnostic(DiagLevel, Info);
   bool OriginallyError =
       Info.getDiags()->getDiagnosticIDs()->isDefaultMappingAsError(
