@@ -345,21 +345,23 @@ std::optional<ParsedAST>
 ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
                  std::unique_ptr<clang::CompilerInvocation> CI,
                  llvm::ArrayRef<Diag> CompilerInvocationDiags,
-                 std::shared_ptr<const PreambleData> Preamble, PCHManager::PCHAccess *PCHAccess) {
+                 std::shared_ptr<const PreambleData> Preamble,
+                 PCHManager::PCHAccess *PCHAccess) {
   trace::Span Tracer("BuildAST");
   SPAN_ATTACH(Tracer, "File", Filename);
 
   auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
   if (Inputs.DraftFS) {
     IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
-        new llvm::vfs::OverlayFileSystem(VFS)); 
-    Overlay->pushOverlay(Inputs.DraftFS);      
+        new llvm::vfs::OverlayFileSystem(VFS));
+    Overlay->pushOverlay(Inputs.DraftFS);
     VFS = Overlay;
   }
-  if (PCHAccess && *PCHAccess) 
-  {
+  if (PCHAccess && *PCHAccess) {
     Preamble = nullptr;
-    log("building AST for {0} and applying PCH {1} (Version {2})", Inputs.CompileCommand.Filename, PCHAccess->filename(), PCHAccess->version());
+    log("building AST for {0} and applying PCH {1} (Version {2})",
+        Inputs.CompileCommand.Filename, PCHAccess->filename(),
+        PCHAccess->version());
     PCHAccess->addPCH(CI.get(), VFS);
   }
 
@@ -572,7 +574,6 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
       return DiagLevel;
     });
 
-
     // Add IncludeFixer which can recover diagnostics caused by missing includes
     // (e.g. incomplete type) and attach include insertion fixes to diagnostics.
     if (Inputs.Index && !BuildDir.getError()) {
@@ -682,6 +683,10 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   Clang->getDiagnostics().setClient(new IgnoreDiagnostics);
   // CompilerInstance won't run this callback, do it directly.
   ASTDiags.EndSourceFile();
+
+  auto &ModifiedASTFile = ASTDiags.getModifiedASTFile();
+  if (PCHAccess && !ModifiedASTFile.empty())
+    PCHAccess->getManager()->checkChangedFile(ModifiedASTFile, VFS);
 
   std::optional<std::vector<Diag>> Diags;
   // FIXME: Also skip generation of diagnostics alltogether to speed up ast
