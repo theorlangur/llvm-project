@@ -40,7 +40,7 @@ struct ScoredSymbolGreater {
 };
 
 // Returns true if \p Query can be found as a sub-sequence inside \p Scope.
-bool approximateScopeMatch(llvm::StringRef Scope, llvm::StringRef Query) {
+bool approximateScopeMatch(llvm::StringRef Scope, llvm::StringRef Query, bool caseInsensitive) {
   assert(Scope.empty() || Scope.ends_with("::"));
   assert(Query.empty() || Query.ends_with("::"));
   while (!Scope.empty() && !Query.empty()) {
@@ -49,7 +49,10 @@ bool approximateScopeMatch(llvm::StringRef Scope, llvm::StringRef Query) {
 
     llvm::StringRef LeadingSpecifier = Scope.slice(0, Colons + 2);
     Scope = Scope.slice(Colons + 2, llvm::StringRef::npos);
-    Query.consume_front(LeadingSpecifier);
+    if (caseInsensitive)
+		Query.consume_front_insensitive(LeadingSpecifier);
+    else
+		Query.consume_front(LeadingSpecifier);
   }
   return Query.empty();
 }
@@ -114,12 +117,16 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
       Req.Limit ? *Req.Limit : std::numeric_limits<size_t>::max());
   FuzzyMatcher Filter(Req.Query);
 
+  auto lowerScope = Names.first.lower();
+  bool caseInsensitive = StringRef(lowerScope) == Names.first;
+
+
   Index->fuzzyFind(Req, [HintPath, &Top, &Filter, AnyScope = Req.AnyScope,
-                         ReqScope = Names.first](const Symbol &Sym) {
+                         ReqScope = Names.first, caseInsensitive](const Symbol &Sym) {
     llvm::StringRef Scope = Sym.Scope;
     // Fuzzyfind might return symbols from irrelevant namespaces if query was
     // not fully-qualified, drop those.
-    if (AnyScope && !approximateScopeMatch(Scope, ReqScope))
+    if (AnyScope && !approximateScopeMatch(Scope, ReqScope, caseInsensitive))
       return;
 
     auto Loc = symbolToLocation(Sym, HintPath);
