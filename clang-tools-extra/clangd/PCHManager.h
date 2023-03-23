@@ -76,13 +76,29 @@ private:
 };
 
 class PCHManager {
+    using FSType = IntrusiveRefCntPtr<llvm::vfs::FileSystem>;
     using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
     struct PCHItem
     {
       enum class State {Valid, Rebuild, Invalid};
+      struct IncFileState
+      {
+        size_t Size;
+        llvm::sys::TimePoint<> ModTime;
+
+		IncFileState(llvm::vfs::Status const &s);
+
+        bool operator==(IncFileState const &rhs) const {
+          return (Size == rhs.Size) && (ModTime == rhs.ModTime);
+        }
+        bool operator!=(IncFileState const &rhs) const { return !operator==(rhs); }
+      };
 
         PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
         unsigned invalidate(uniq_lck &Lock, bool WaitForNoUsage);
+
+        bool isIncludeStateDifferent(StringRef path, FSType &VFS) const;
+        void updateIncludeStates(FSType &VFS);
 
         tooling::CompileCommand CompileCommand;
         std::shared_ptr<std::string> PCHData;
@@ -90,6 +106,7 @@ class PCHManager {
         std::vector<PCHItem*> IdependOn;
         IncludeStructure Includes;
         CanonicalIncludes CanonIncludes;
+        llvm::StringMap<IncFileState> IncludeStates;
         State ItemState = State::Rebuild;
         int Version = 0;
         bool Dynamic = false;
@@ -132,7 +149,7 @@ public:
     PCHAccess& operator=(const PCHAccess &) = delete;
     PCHAccess& operator=(PCHAccess &&);
 
-    bool addPCH(CompilerInvocation *CI, IntrusiveRefCntPtr<llvm::vfs::FileSystem> &VFS) const;
+    bool addPCH(CompilerInvocation *CI, FSType &VFS) const;
     llvm::StringRef filename() const {return Item->CompileCommand.Filename;}
     auto version() const { return Item->Version; }
 
@@ -149,8 +166,6 @@ public:
     PCHManager *pManager = nullptr;
     friend class PCHManager;
   };
-
-  using FSType = llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>;
 
   void checkChangedFile(PathRef File, FSType FS);
 
@@ -190,7 +205,7 @@ public:
     announcedPCHTask(const std::vector<tooling::CompileCommand> &AnnouncedPCHs);
 
     void analyzePCHDependencies(std::vector<tooling::CompileCommand> PCHCommands);
-    unsigned invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles);
+    unsigned invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles, FSType FSl);
     void rebuildInvalidatedPCH(unsigned Tota, FSType FSl);
     void updateAllHeaders();
     void rebuildPCH(PCHItem &Item, FSType FS);
