@@ -1020,7 +1020,7 @@ PCHManager::findDynPCH(clang::clangd::PathRef PCHFile) const {
         return {};
 
       vlog("(findDynamicPCH) found request for {0}", PCHFile);
-      return PCHAccess(I);
+      return PCHAccess(I, const_cast<PCHManager*>(this));
     }
   }
   return {};
@@ -1049,7 +1049,7 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
         return {};
 
       vlog("(findPCH) found request for {0}", PCHFile);
-      return PCHAccess(I.get());
+      return PCHAccess(I.get(), const_cast<PCHManager*>(this));
     }
   }
   return {};
@@ -1073,19 +1073,19 @@ bool PCHManager::PCHAccess::addPCH(
   return false;
 }
 
-PCHManager::PCHAccess::PCHAccess(const PCHItem *Item) : Item(Item) {
+PCHManager::PCHAccess::PCHAccess(const PCHItem *Item, PCHManager *pMgr) : Item(Item), pManager(pMgr) {
   if (Item)
     ++Item->InUse;
 }
 
-PCHManager::PCHAccess::PCHAccess(std::shared_ptr<PCHItem> ShItem)
-    : DynItem(ShItem), Item(ShItem.get()) {
+PCHManager::PCHAccess::PCHAccess(std::shared_ptr<PCHItem> ShItem, PCHManager *pMgr)
+    : DynItem(ShItem), Item(ShItem.get()), pManager(pMgr) {
   if (Item) {
     ++Item->InUse;
   }
 }
 
-PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : DynItem(std::move(Rhs.DynItem)), Item(Rhs.Item), UsedPCHDatas(std::move(Rhs.UsedPCHDatas)) {
+PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : DynItem(std::move(Rhs.DynItem)), Item(Rhs.Item), UsedPCHDatas(std::move(Rhs.UsedPCHDatas)), pManager(Rhs.pManager) {
   Rhs.Item = nullptr;
 }
 PCHManager::PCHAccess::~PCHAccess() {
