@@ -716,6 +716,7 @@ enum class ErrorResultCode : int {
   CheckFailed = 3
 };
 
+static const char *PCHVers = "PCH ver. 1.01";
 int clangdMain(int argc, char *argv[]) {
   llvm::InitializeAllTargetInfos();
   llvm::sys::PrintStackTraceOnErrorSignal(argv[0]);
@@ -730,7 +731,8 @@ int clangdMain(int argc, char *argv[]) {
   llvm::cl::SetVersionPrinter([](llvm::raw_ostream &OS) {
     OS << versionString() << "\n"
        << "Features: " << featureString() << "\n"
-       << "Platform: " << platformString() << "\n";
+       << "Platform: " << platformString() << "\n"
+       << PCHVers << "\n";
   });
   const char *FlagsEnvVar = "CLANGD_FLAGS";
   const char *Overview =
@@ -850,7 +852,7 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
   log("{0}", versionString());
   log("Features: {0}", featureString());
   log("PID: {0}", llvm::sys::Process::getProcessId());
-  log("PCH ver. 1.01");
+  log("{0}", PCHVers);
   {
     SmallString<128> CWD;
     if (auto Err = llvm::sys::fs::current_path(CWD))
