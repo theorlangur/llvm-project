@@ -860,6 +860,7 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
   log("{0}", versionString());
   log("Features: {0}", featureString());
   log("PID: {0}", llvm::sys::Process::getProcessId());
+  log("PCH ver. 1.0");
   {
     SmallString<128> CWD;
     if (auto Err = llvm::sys::fs::current_path(CWD))
