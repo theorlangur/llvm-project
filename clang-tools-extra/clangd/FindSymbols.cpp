@@ -116,18 +116,17 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
   TopN<ScoredSymbolInfo, ScoredSymbolGreater> Top(
       Req.Limit ? *Req.Limit : std::numeric_limits<size_t>::max());
   FuzzyMatcher Filter(Req.Query);
-
-  auto lowerScope = Names.first.lower();
-  bool caseInsensitive = StringRef(lowerScope) == Names.first;
-
+  FuzzyMatcher ScopeFilter(Names.first);
 
   Index->fuzzyFind(Req, [HintPath, &Top, &Filter, AnyScope = Req.AnyScope,
-                         ReqScope = Names.first, caseInsensitive](const Symbol &Sym) {
+                         ReqScope = Names.first, &ScopeFilter](const Symbol &Sym) {
     llvm::StringRef Scope = Sym.Scope;
     // Fuzzyfind might return symbols from irrelevant namespaces if query was
     // not fully-qualified, drop those.
-    if (AnyScope && !approximateScopeMatch(Scope, ReqScope, caseInsensitive))
-      return;
+    if (AnyScope) {
+      if (auto m = ScopeFilter.match(Scope); m && *m < 0.5f)
+        return;
+    }
 
     auto Loc = symbolToLocation(Sym, HintPath);
     if (!Loc) {
