@@ -137,13 +137,16 @@ public:
     auto version() const { return Item->Version; }
 
     operator bool() const { return Item != nullptr; }
+
+    PCHManager *getManager() const { return pManager; }
   private:
-    PCHAccess(const PCHItem *Item);
-    PCHAccess(std::shared_ptr<PCHItem> ShItem);
+    PCHAccess(const PCHItem *Item, PCHManager *pMgr);
+    PCHAccess(std::shared_ptr<PCHItem> ShItem, PCHManager *pMgr);
 
    std::shared_ptr<PCHItem> DynItem;
     const PCHItem *Item = nullptr;
     mutable UsedPCHDataList UsedPCHDatas;
+    PCHManager *pManager = nullptr;
     friend class PCHManager;
   };
 

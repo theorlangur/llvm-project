@@ -164,6 +164,8 @@ public:
   /// of the callback can also mutate the diagnostic.
   void setDiagCallback(DiagCallback CB) { DiagCB = std::move(CB); }
 
+  const std::string &getModifiedASTFile() const { return m_ModifiedASTFile; }
+
 private:
   void flushLastDiag();
 
@@ -178,6 +180,7 @@ private:
   SourceManager *OrigSrcMgr = nullptr;
 
   llvm::DenseSet<std::pair<unsigned, unsigned>> IncludedErrorLocations;
+  std::string m_ModifiedASTFile;
 };
 
 /// Determine whether a (non-clang-tidy) diagnostic is suppressed by config.
