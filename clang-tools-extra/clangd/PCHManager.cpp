@@ -197,7 +197,7 @@ PCHQueue::Task
 PCHManager::changedFilesTask(const std::vector<std::string> &ChangedFiles,
                              FSType FS) {
   PCHQueue::Task T([this, ChangedFiles, FS] {
-    unsigned Invalidated = invalidateAffectedPCH(ChangedFiles);
+    unsigned Invalidated = invalidateAffectedPCH(ChangedFiles, FS);
     rebuildInvalidatedPCH(Invalidated, FS);
     updateAllHeaders();
   });
@@ -452,8 +452,32 @@ unsigned PCHManager::PCHItem::invalidate(uniq_lck &Lock, bool WaitForNoUsage) {
   return Res;
 }
 
+bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
+                                                  FSType &VFS) const {
+  if (auto I = IncludeStates.find(path); I != IncludeStates.end()) {
+    if (auto Status = VFS->status(path))
+      return I->getValue() != *Status;
+  }
+  return false;
+}
+
+void PCHManager::PCHItem::updateIncludeStates(FSType &VFS) {
+  for (const auto &I : Includes.allHeaders()) {
+    if (auto S = VFS->status(I))
+      IncludeStates.insert_or_assign(I, *S);
+  }
+  for (auto const &H : DynamicIncludes) {
+    auto const &I = H.getKey();
+    if (auto S = VFS->status(I))
+      IncludeStates.insert_or_assign(I, *S);
+  }
+}
+
+PCHManager::PCHItem::IncFileState::IncFileState(llvm::vfs::Status const &s)
+    : Size(s.getSize()), ModTime(s.getLastModificationTime()) {}
+
 unsigned PCHManager::invalidateAffectedPCH(
-    const std::vector<std::string> &ChangedFiles) {
+    const std::vector<std::string> &ChangedFiles, FSType FSl) {
   unsigned Invalidated = 0;
   llvm::StringSet<> ChangedU;
   llvm::StringSet<> ChangedL;
@@ -483,8 +507,14 @@ unsigned PCHManager::invalidateAffectedPCH(
           log("(PCH) invalidating {0} and all dependendents because"
               " of the included (possible indirectly) {1} has changed",
               Item.CompileCommand.Filename, S);
-          Invalidated += Item.invalidate(ExclusiveAccessToPCH, false);//don't have to wait due to shared_ptr model of PCHData
-          break;
+          if (Item.isIncludeStateDifferent(S, FSl))
+          {
+			  Invalidated += Item.invalidate(ExclusiveAccessToPCH, false);//don't have to wait due to shared_ptr model of PCHData
+			  break;
+          } else {
+                          log("(PCH) state of {0} in PCH is the same as the "
+                              "current state in FS, so not invalidating anything...", S);
+          }
         }
       }
     }
@@ -501,18 +531,30 @@ unsigned PCHManager::invalidateAffectedPCH(
       if (!Item.IdependOn.empty() && Item.IdependOn[0]->ItemState == PCHItem::State::Rebuild) {
         Item.ItemState = PCHItem::State::Rebuild;
         ++Item.Version;
-      }
-      else
-      {
-          for (auto const& h : Item.DynamicIncludes)
-          {
-			if (ChangedU.contains(h.getKey()) || ChangedL.contains(h.getKey())) {
-			  log("(DynPCH) invalidating {0} and all dependendents because"
-				  " of the included (possible indirectly) {1} has changed",
-				  Item.CompileCommand.Filename, h.getKey());
-			  Invalidated += Item.invalidate(dummyLock, false);//don't have to wait due to shared_ptr model of PCHData
-			}
-		  }
+      } else {
+        for (auto const &h : Item.DynamicIncludes) {
+          const auto &I = h.getKey();
+          if (ChangedU.contains(I) || ChangedL.contains(I)) {
+                          log("(DynPCH) invalidating {0} and all dependendents "
+                              "because"
+                              " of the included (possible indirectly) {1} has "
+                              "changed",
+                              Item.CompileCommand.Filename, I);
+                          if (Item.isIncludeStateDifferent(I, FSl)) {
+                            Invalidated += Item.invalidate(
+                                dummyLock,
+                                false); // don't have to wait due to shared_ptr
+                                        // model of PCHData
+                            break;
+                          } else {
+                            log("(DynPCH) state of {0} in PCH is the same as "
+                                "the "
+                                "current state in FS, so not invalidating "
+                                "anything...",
+                                I);
+                          }
+          }
+        }
       }
     }
   }
@@ -871,6 +913,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 
   if (Item.Dynamic && pPPSkipIncludes)
       Item.DynamicIncludes = pPPSkipIncludes->takeAllowedIncludes();
+  Item.updateIncludeStates(VFS);
   std::atomic_store(&Item.PCHData, newPCH);
   S = PCHItem::State::Valid;
   log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
