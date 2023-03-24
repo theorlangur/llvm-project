@@ -501,11 +501,10 @@ unsigned PCHManager::invalidateAffectedPCH(
     } else
       ChangedU.insert(S);
   }
-  auto CheckChanged = [&](auto const &S) {
+  auto CheckChanged = [&](auto const &S)->bool {
     if (ChangedU.contains(S))
       return true;
-    if (checkCase)
-      return ChangedL.contains(S);
+    return checkCase && ChangedL.contains(S);
   };
   {
     uniq_lck ExclusiveAccessToPCH(PCHLock);
