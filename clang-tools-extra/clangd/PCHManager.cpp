@@ -457,6 +457,16 @@ bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
   if (auto I = IncludeStates.find(path); I != IncludeStates.end()) {
     if (auto Status = VFS->status(path))
       return I->getValue() != *Status;
+    if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
+    {
+      // check case
+      std::string t = path.str();
+      t[0] = std::toupper(path[0]);
+      if (t[0] == path[0])
+        t[0] = std::tolower(path[0]);
+      if (auto Status = VFS->status(t))
+        return I->getValue() != *Status;
+    }
   }
   return false;
 }
@@ -481,12 +491,22 @@ unsigned PCHManager::invalidateAffectedPCH(
   unsigned Invalidated = 0;
   llvm::StringSet<> ChangedU;
   llvm::StringSet<> ChangedL;
+  bool checkCase = llvm::sys::path::is_style_windows(llvm::sys::path::Style::native);
   for (auto S : ChangedFiles) {
-    S[0] = std::toupper(S[0]);
-    ChangedU.insert(S);
-    S[0] = std::tolower(S[0]);
-    ChangedL.insert(S);
+    if (checkCase) {
+      S[0] = std::toupper(S[0]);
+      ChangedU.insert(S);
+      S[0] = std::tolower(S[0]);
+      ChangedL.insert(S);
+    } else
+      ChangedU.insert(S);
   }
+  auto CheckChanged = [&](auto const &S) {
+    if (ChangedU.contains(S))
+      return true;
+    if (checkCase)
+      return ChangedL.contains(S);
+  };
   {
     uniq_lck ExclusiveAccessToPCH(PCHLock);
     for (auto &UI : PCHs) {
@@ -494,8 +514,7 @@ unsigned PCHManager::invalidateAffectedPCH(
       if (Item.ItemState == PCHItem::State::Rebuild)
         continue;
 
-      if (ChangedU.contains(Item.CompileCommand.Filename) ||
-          ChangedL.contains(Item.CompileCommand.Filename)) {
+      if (CheckChanged(Item.CompileCommand.Filename)) {
         log("(PCH) invalidating {0} and all dependendents",
             Item.CompileCommand.Filename);
         Invalidated += Item.invalidate(ExclusiveAccessToPCH, false);//don't have to wait due to shared_ptr model of PCHData
@@ -503,7 +522,7 @@ unsigned PCHManager::invalidateAffectedPCH(
       }
 
       for (const auto &S : Item.Includes.allHeaders()) {
-        if (ChangedU.contains(S) || ChangedL.contains(S)) {
+        if (CheckChanged(S)){
           log("(PCH) invalidating {0} and all dependendents because"
               " of the included (possible indirectly) {1} has changed",
               Item.CompileCommand.Filename, S);
@@ -534,7 +553,7 @@ unsigned PCHManager::invalidateAffectedPCH(
       } else {
         for (auto const &h : Item.DynamicIncludes) {
           const auto &I = h.getKey();
-          if (ChangedU.contains(I) || ChangedL.contains(I)) {
+          if (CheckChanged(I)){
                           log("(DynPCH) invalidating {0} and all dependendents "
                               "because"
                               " of the included (possible indirectly) {1} has "
