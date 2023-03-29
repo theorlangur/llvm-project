@@ -123,9 +123,13 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
     llvm::StringRef Scope = Sym.Scope;
     // Fuzzyfind might return symbols from irrelevant namespaces if query was
     // not fully-qualified, drop those.
+    float scopeFactor = 1.f;
     if (AnyScope) {
-      if (auto m = ScopeFilter.match(Scope); m && *m < 0.5f)
+		auto m = ScopeFilter.match(Scope);
+      if (!m || *m < 0.5f)
         return;
+      else
+        scopeFactor = *m;
     }
 
     auto Loc = symbolToLocation(Sym, HintPath);
@@ -166,6 +170,9 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
     Info.score = Relevance.NameMatch > std::numeric_limits<float>::epsilon()
                      ? Score / Relevance.NameMatch
                      : QualScore;
+    if (Info.score)
+      Info.score = (*Info.score) * scopeFactor;
+    vlog("FindSymbols adding: {0}; {1}; {2}; {3}", Info.name, (int)Info.kind, Info.containerName, Info.score);
     Top.push({Score, std::move(Info)});
   });
   for (auto &R : std::move(Top).items())
