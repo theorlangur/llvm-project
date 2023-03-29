@@ -686,6 +686,8 @@ void StoreDiags::HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
   {
       //remember that
       m_ModifiedASTFile = Info.getArgStdStr(0);
+      if (auto fe = Info.getSourceManager().getFileManager().getFile(m_ModifiedASTFile))
+        m_ModifiedASTFile = Info.getSourceManager().getFileManager().getCanonicalName(*fe);
       elog("Encountered 'AST file modified' failuer. Remembering file in question: {0}", m_ModifiedASTFile);
   }
 
