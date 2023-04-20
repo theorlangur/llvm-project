@@ -506,6 +506,7 @@ unsigned PCHManager::invalidateAffectedPCH(
       return true;
     return checkCase && ChangedL.contains(S);
   };
+  bool pchUpdateRunning = Complete.load(std::memory_order_relaxed) != Total;
   {
     uniq_lck ExclusiveAccessToPCH(PCHLock);
     for (auto &UI : PCHs) {
@@ -525,7 +526,7 @@ unsigned PCHManager::invalidateAffectedPCH(
           log("(PCH) invalidating {0} and all dependendents because"
               " of the included (possible indirectly) {1} has changed",
               Item.CompileCommand.Filename, S);
-          if (Item.isIncludeStateDifferent(S, FSl))
+          if (!pchUpdateRunning || Item.isIncludeStateDifferent(S, FSl))
           {
 			  Invalidated += Item.invalidate(ExclusiveAccessToPCH, false);//don't have to wait due to shared_ptr model of PCHData
 			  break;
@@ -558,7 +559,7 @@ unsigned PCHManager::invalidateAffectedPCH(
                               " of the included (possible indirectly) {1} has "
                               "changed",
                               Item.CompileCommand.Filename, I);
-                          if (Item.isIncludeStateDifferent(I, FSl)) {
+                          if (!pchUpdateRunning || Item.isIncludeStateDifferent(I, FSl)) {
                             Invalidated += Item.invalidate(
                                 dummyLock,
                                 false); // don't have to wait due to shared_ptr
@@ -684,11 +685,20 @@ if (m_Skipped)
 if (m_TargetRef.has_value() && File.has_value() && *m_TargetRef == *File) {
   m_Skipped = true;
   if (!m_SkipTarget)
+  {
 	  m_AllowedIncludes.insert((*File).getFileEntry().tryGetRealPathName().str());
+    vlog("PPSkipIncludes: (final) included {}", (*File).getFileEntry().tryGetRealPathName().str());
+  }else
+  {
+    vlog("PPSkipIncludes: (final) not included {}", (*File).getFileEntry().tryGetRealPathName().str());
+  }
   return !m_SkipTarget;
 }
 if (File.has_value())
+  {
 	  m_AllowedIncludes.insert((*File).getFileEntry().tryGetRealPathName().str());
+    vlog("PPSkipIncludes: included {}", (*File).getFileEntry().tryGetRealPathName().str());
+  }
   return true;
 }
 
