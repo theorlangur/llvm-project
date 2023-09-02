@@ -662,7 +662,7 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
     PCH.addPCH(&CI, VFS);
   }
 
-  auto StatCache = std::make_unique<PreambleFileStatusCache>(AbsFileName);
+  auto StatCache = std::make_shared<PreambleFileStatusCache>(AbsFileName);
   auto StatCacheFS = StatCache->getProducingFS(VFS);
   llvm::IntrusiveRefCntPtr<TimerFS> TimedFS(new TimerFS(StatCacheFS));
 
