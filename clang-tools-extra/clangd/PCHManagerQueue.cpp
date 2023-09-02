@@ -14,7 +14,7 @@ void PCHQueue::notifyProgress() const {
 
 void PCHQueue::work(std::function<void()> OnIdle) {
   while (true) {
-    llvm::Optional<Task> Task;
+    std::optional<Task> Task;
     {
       std::unique_lock<std::mutex> Lock(Mu);
       CV.wait(Lock, [&] { return ShouldStop || !Queue.empty(); });
