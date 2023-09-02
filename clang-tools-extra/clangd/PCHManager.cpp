@@ -11,7 +11,6 @@
 #include "clang/Serialization/ASTWriter.h"
 #include "clang/Serialization/PCHContainerOperations.h"
 #include "clang/Tooling/CompilationDatabase.h"
-#include "llvm/ADT/None.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
@@ -135,17 +134,22 @@ public:
 
   CanonicalIncludes takeCanonicalIncludes() { return std::move(CanonIncludes); }
 
+  include_cleaner::PragmaIncludes takePragmaIncludes() {
+    return std::move(Pragmas);
+  }
+
   void AfterExecute(CompilerInstance &CI) override {
     if (!ParsedCallback)
       return;
     trace::Span Tracer("Running PreambleCallback");
-    ParsedCallback(CI.getASTContext(), *CI.getPreprocessorPtr(), CanonIncludes);
+    ParsedCallback(CapturedASTCtx(CI), std::make_shared<const include_cleaner::PragmaIncludes>(takePragmaIncludes()));
   }
 
   void BeforeExecute(CompilerInstance &CI) override {
     CanonIncludes.addSystemHeadersMapping(CI.getLangOpts());
     LangOpts = &CI.getLangOpts();
     SourceMgr = &CI.getSourceManager();
+    Pragmas.record(CI);
   }
 
   void InitiateIncludeCollection(CompilerInstance &CI)
@@ -165,6 +169,7 @@ private:
   PreambleParsedCallback ParsedCallback;
   IncludeStructure Includes;
   CanonicalIncludes CanonIncludes;
+  include_cleaner::PragmaIncludes Pragmas;
   const clang::LangOptions *LangOpts = nullptr;
   const SourceManager *SourceMgr = nullptr;
 };
@@ -801,14 +806,12 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   auto &Inv = *Invocation;
   CppFilePreambleCallbacks SerializedDeclsCollector(
       Item.CompileCommand.Filename,
-      [&](ASTContext &AST, clang::Preprocessor &PP,
-          const CanonicalIncludes &CanInc) {
+      [&](CapturedASTCtx AST, std::shared_ptr<const include_cleaner::PragmaIncludes> PragmaIncludes) {
         if (!Item.Dynamic) { // no symbol updates from dynamic pchs, those are
                              // limited by definition
           // call Callback.onPreambleAST
           Callbacks.onPreambleAST(Item.CompileCommand.Filename,
-                                  std::to_string(Item.Version), Inv, AST, PP,
-                                  CanInc);
+                                  std::to_string(Item.Version), std::move(AST), PragmaIncludes);
         }
       });
   PreambleCallbacks &Callbacks = SerializedDeclsCollector;
