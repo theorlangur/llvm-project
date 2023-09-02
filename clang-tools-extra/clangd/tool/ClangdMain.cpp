@@ -716,7 +716,7 @@ enum class ErrorResultCode : int {
   CheckFailed = 3
 };
 
-static const char *PCHVers = "PCH ver. 1.01";
+static const char *PCHVers = "PCH ver. 1.02";
 int clangdMain(int argc, char *argv[]) {
   llvm::InitializeAllTargetInfos();
   llvm::sys::PrintStackTraceOnErrorSignal(argv[0]);
