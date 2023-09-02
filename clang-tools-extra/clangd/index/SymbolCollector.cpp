@@ -399,7 +399,7 @@ private:
     if (!FE || FE->getName().empty())
       return "";
 
-    if (auto Verbatim = PI->getPublic(*FE); !Verbatim.empty())
+    if (auto Verbatim = PI ? PI->getPublic(*FE) : llvm::StringRef{}; !Verbatim.empty())
       return Verbatim;
 
     llvm::StringRef Filename = FE->getName();
