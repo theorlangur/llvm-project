@@ -34,7 +34,9 @@ namespace {
 std::string NormalizePath(llvm::StringRef path) {
   // If we use "path" to construct a FileSpec, it will normalize the path for
   // us. We then grab the string.
-  return FileSpec(path).GetPath();
+  //return FileSpec(path).GetPath();
+    return path;
+  }
 }
 }
 // PathMappingList constructor
