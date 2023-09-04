@@ -1,0 +1,1 @@
+'cmake -Bbuild_py -G Ninja -DLLVM_ENABLE_PROJECTS="clang;lldb" -DSWIG_DIR=c:\Work\tools\swig\swigwin-4.0.2 -DSWIG_EXECUTABLE=c:\Work\tools\swig\swigwin-4.0.2\swig.exe -DLLDB_ENABLE_PYTHON=1 -DPYTHON_HOME=c:\Users\dmitryd\AppData\Local\Programs\Python\Python39 -DCMAKE_BUILD_TYPE=Release llvm' 

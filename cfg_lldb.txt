@@ -1,0 +1,1 @@
+'cmake -Bbuild -G Ninja -DLLVM_ENABLE_PROJECTS="clang;lldb" -DPYTHON_HOME=c:\Users\dmitryd\AppData\Local\Programs\Python\Python39 -DCMAKE_BUILD_TYPE=Release llvm' 
