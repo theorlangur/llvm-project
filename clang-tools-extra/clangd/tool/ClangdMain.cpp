@@ -453,6 +453,16 @@ opt<std::string> PathMappingsArg{
     init(""),
 };
 
+opt<std::string> ClangdCacheDirArg{
+    "cache-dir",
+    cat(Misc),
+    desc(
+        "defines name of the folder to store cache for clangd"
+        "default: 'clangd' (in $Root/.cache/)"
+    ),
+    init(""),
+};
+
 opt<Path> InputMirrorFile{
     "input-mirror-file",
     cat(Protocol),
@@ -982,6 +992,7 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
   };
   if (ForceOffsetEncoding != OffsetEncoding::UnsupportedEncoding)
     Opts.Encoding = ForceOffsetEncoding;
+  Opts.ClangdCacheDir = ClangdCacheDirArg;
 
   if (CheckFile.getNumOccurrences()) {
     llvm::SmallString<256> Path;
