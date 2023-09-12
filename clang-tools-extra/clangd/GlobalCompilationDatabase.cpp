@@ -452,6 +452,7 @@ DirectoryBasedGlobalCompilationDatabase::lookupCDB(
   CDBLookupResult Result;
   Result.CDB = std::move(CDB);
   Result.PI.SourceRoot = DirCache->Path;
+  Result.PI.ClangdCacheDir = Opts.ClangdCacheDir;
 
   if (ShouldBroadcast)
     broadcastCDB(Result);

@@ -553,6 +553,7 @@ void ClangdLSPServer::onInitialize(const InitializeParams &Params,
     if (const auto &Dir = Params.initializationOptions.compilationDatabasePath)
       CDBOpts.CompileCommandsDir = Dir;
     CDBOpts.ContextProvider = Opts.ContextProvider;
+    CDBOpts.ClangdCacheDir = Opts.ClangdCacheDir;
     BaseCDB =
         std::make_unique<DirectoryBasedGlobalCompilationDatabase>(CDBOpts);
   }

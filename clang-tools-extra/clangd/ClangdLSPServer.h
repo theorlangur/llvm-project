@@ -63,6 +63,8 @@ public:
 
     /// Limit the number of references returned (0 means no limit).
     size_t ReferencesLimit = 0;
+
+    std::string ClangdCacheDir;
   };
 
   ClangdLSPServer(Transport &Transp, const ThreadsafeFS &TFS,
