@@ -66,6 +66,7 @@ public:
 
     /// Flag to hint the experimental modules support is enabled.
     bool EnableExperimentalModulesSupport = false;
+    std::string ClangdCacheDir;
   };
 
   ClangdLSPServer(Transport &Transp, const ThreadsafeFS &TFS,

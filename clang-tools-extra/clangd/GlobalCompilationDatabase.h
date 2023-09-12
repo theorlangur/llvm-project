@@ -30,6 +30,7 @@ struct ProjectInfo {
   // The directory in which the compilation database was discovered.
   // Empty if directory-based compilation database discovery was not used.
   std::string SourceRoot;
+  std::string ClangdCacheDir;
 };
 
 /// Provides compilation arguments used for parsing C and C++ files.
@@ -126,6 +127,7 @@ public:
     // Only look for a compilation database in this one fixed directory.
     // FIXME: fold this into config/context mechanism.
     std::optional<Path> CompileCommandsDir;
+    std::string ClangdCacheDir;
   };
 
   DirectoryBasedGlobalCompilationDatabase(const Options &Opts);
