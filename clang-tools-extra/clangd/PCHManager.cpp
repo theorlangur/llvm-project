@@ -643,12 +643,12 @@ void PCHManager::addDynamicGhost(const PCHItem* Dep, IntrusiveRefCntPtr<llvm::vf
     MemFS->addFile(Dep->CompileCommand.Filename, 0, std::move(Buf));
 }
 
-IntrusiveRefCntPtr<llvm::vfs::FileSystem>
-PCHManager::addDependencies(const PCHItem *Dep,
-                            IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, 
-                            UsedPCHDataList &pchdatas) {
+IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> 
+PCHManager::collectDependencies(const PCHItem *Dep, UsedPCHDataList &pchdatas)
+{
   IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS(
       new llvm::vfs::InMemoryFileSystem());
+
   if (Dep->Dynamic)
     addDynamicGhost(Dep, PCHFS);
   while (Dep) {
@@ -662,7 +662,14 @@ PCHManager::addDependencies(const PCHItem *Dep,
       elog("(PCH) empty data on dependency {0}!!! (Status: {1})", Dep->CompileCommand.Filename, (int)Dep->ItemState);
     }
   }
+  return PCHFS;
+}
 
+IntrusiveRefCntPtr<llvm::vfs::FileSystem>
+PCHManager::addDependencies(const PCHItem *Dep,
+                            IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, 
+                            UsedPCHDataList &pchdatas) {
+  IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS = collectDependencies(Dep, pchdatas);
   IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
       new llvm::vfs::OverlayFileSystem(VFS));
 
@@ -803,7 +810,6 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
         VFS = addDependencies(Dep, VFS, UsedPCHDatas);
   }
 
-  auto &Inv = *Invocation;
   CppFilePreambleCallbacks SerializedDeclsCollector(
       Item.CompileCommand.Filename,
       [&](CapturedASTCtx AST, std::shared_ptr<const include_cleaner::PragmaIncludes> PragmaIncludes) {
@@ -1131,7 +1137,12 @@ bool PCHManager::PCHAccess::addPCH(
     pp.UsePredefines = false;
     pp.ImplicitPCHInclude =
         std::string(Item->CompileCommand.Filename) + ".pch";
-    VFS = addDependencies(Item, VFS, UsedPCHDatas);
+
+    IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
+        new llvm::vfs::OverlayFileSystem(VFS));
+
+    Overlay->pushOverlay(PCHSnapshotMemFS);
+    VFS = Overlay;
     return true;
   }
   return false;
@@ -1139,17 +1150,27 @@ bool PCHManager::PCHAccess::addPCH(
 
 PCHManager::PCHAccess::PCHAccess(const PCHItem *Item, PCHManager *pMgr) : Item(Item), pManager(pMgr) {
   if (Item)
+  {
     ++Item->InUse;
+    PCHSnapshotMemFS = collectDependencies(Item, UsedPCHDatas);
+  }
 }
 
 PCHManager::PCHAccess::PCHAccess(std::shared_ptr<PCHItem> ShItem, PCHManager *pMgr)
     : DynItem(ShItem), Item(ShItem.get()), pManager(pMgr) {
   if (Item) {
     ++Item->InUse;
+    PCHSnapshotMemFS = collectDependencies(Item, UsedPCHDatas);
   }
 }
 
-PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : DynItem(std::move(Rhs.DynItem)), Item(Rhs.Item), UsedPCHDatas(std::move(Rhs.UsedPCHDatas)), pManager(Rhs.pManager) {
+PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : 
+    DynItem(std::move(Rhs.DynItem)), 
+    Item(Rhs.Item), 
+    UsedPCHDatas(std::move(Rhs.UsedPCHDatas)), 
+    pManager(Rhs.pManager),
+    PCHSnapshotMemFS(std::move(Rhs.PCHSnapshotMemFS))
+{
   Rhs.Item = nullptr;
 }
 PCHManager::PCHAccess::~PCHAccess() {
@@ -1160,6 +1181,7 @@ PCHManager::PCHAccess::~PCHAccess() {
 PCHManager::PCHAccess &PCHManager::PCHAccess::operator=(PCHAccess &&Rhs) {
   std::swap(Item, Rhs.Item);
   UsedPCHDatas = std::move(Rhs.UsedPCHDatas);
+  PCHSnapshotMemFS = std::move(Rhs.PCHSnapshotMemFS);
   DynItem = std::move(Rhs.DynItem);
   return *this;
 }
