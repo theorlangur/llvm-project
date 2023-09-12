@@ -163,6 +163,7 @@ public:
     const PCHItem *Item = nullptr;
     mutable UsedPCHDataList UsedPCHDatas;
     PCHManager *pManager = nullptr;
+    IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHSnapshotMemFS;
     friend class PCHManager;
   };
 
@@ -209,6 +210,7 @@ public:
     void updateAllHeaders();
     void rebuildPCH(PCHItem &Item, FSType FS);
 
+    static IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> collectDependencies(const PCHItem *Dep, UsedPCHDataList &pchdatas);
     static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, UsedPCHDataList &pchdatas);
     static void addDynamicGhost(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS);
 
