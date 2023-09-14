@@ -161,6 +161,7 @@ private:
   std::vector<Decl *> LocalTopLevelDecls;
   IncludeStructure Includes;
   std::unique_ptr<HeuristicResolver> Resolver;
+  std::optional<PCHManager::PCHAccess> PCHAccessLifeTime;
 };
 
 } // namespace clangd
