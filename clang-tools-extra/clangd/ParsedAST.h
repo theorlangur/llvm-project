@@ -160,6 +160,7 @@ private:
   IncludeStructure Includes;
   include_cleaner::PragmaIncludes PI;
   std::unique_ptr<HeuristicResolver> Resolver;
+  std::optional<PCHManager::PCHAccess> PCHAccessLifeTime;
 };
 
 } // namespace clangd

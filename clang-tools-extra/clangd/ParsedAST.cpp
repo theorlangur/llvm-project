@@ -775,6 +775,8 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
                    std::move(Diags), std::move(Includes), std::move(PI));
   llvm::move(getIncludeCleanerDiags(Result, Inputs.Contents, *Inputs.TFS),
              std::back_inserter(Result.Diags));
+  if (PCHAccess)//make sure VFS lives long enough
+    Result.PCHAccessLifeTime = std::move(*PCHAccess);
   return std::move(Result);
 }
 
