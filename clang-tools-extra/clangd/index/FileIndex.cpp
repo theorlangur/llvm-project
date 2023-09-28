@@ -46,12 +46,12 @@ namespace {
 SlabTuple indexSymbols(ASTContext &AST, Preprocessor &PP,
                        llvm::ArrayRef<Decl *> DeclsToIndex,
                        const MainFileMacros *MacroRefsToIndex,
-                       const include_cleaner::PragmaIncludes &PI,
+                       const include_cleaner::PragmaIncludes *PI,
                        bool IsIndexMainAST, llvm::StringRef Version,
                        bool CollectMainFileRefs) {
   SymbolCollector::Options CollectorOpts;
   CollectorOpts.CollectIncludePath = true;
-  CollectorOpts.PragmaIncludes = &PI;
+  CollectorOpts.PragmaIncludes = PI;
   CollectorOpts.CountReferences = false;
   CollectorOpts.Origin =
       IsIndexMainAST ? SymbolOrigin::Open : SymbolOrigin::Preamble;
@@ -223,7 +223,7 @@ FileShardedIndex::getShard(llvm::StringRef Uri) const {
 SlabTuple indexMainDecls(ParsedAST &AST) {
   return indexSymbols(
       AST.getASTContext(), AST.getPreprocessor(), AST.getLocalTopLevelDecls(),
-      &AST.getMacros(), AST.getPragmaIncludes(),
+      &AST.getMacros(), AST.getPragmaIncludes().get(),
       /*IsIndexMainAST=*/true, AST.version(), /*CollectMainFileRefs=*/true);
 }
 
@@ -234,7 +234,7 @@ SlabTuple indexHeaderSymbols(llvm::StringRef Version, ASTContext &AST,
       AST.getTranslationUnitDecl()->decls().begin(),
       AST.getTranslationUnitDecl()->decls().end());
   return indexSymbols(AST, PP, DeclsToIndex,
-                      /*MainFileMacros=*/nullptr, PI,
+                      /*MainFileMacros=*/nullptr, &PI,
                       /*IsIndexMainAST=*/false, Version,
                       /*CollectMainFileRefs=*/false);
 }
