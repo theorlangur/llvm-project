@@ -5002,6 +5002,9 @@ void Sema::InstantiateFunctionDefinition(SourceLocation PointOfInstantiation,
     auto LPTIter = LateParsedTemplateMap.find(PatternDecl);
     assert(LPTIter != LateParsedTemplateMap.end() &&
            "missing LateParsedTemplate");
+    if (LPTIter == LateParsedTemplateMap.end())
+      return;
+
     LateTemplateParser(OpaqueParser, *LPTIter->second);
     Pattern = PatternDecl->getBody(PatternDecl);
     updateAttrsForLateParsedTemplate(PatternDecl, Function);
