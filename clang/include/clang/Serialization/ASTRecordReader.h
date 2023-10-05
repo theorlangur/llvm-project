@@ -200,15 +200,18 @@ public:
   /// result type.
   template<typename T>
   T *readDeclAs() {
+    if (Record.size() <= Idx) return nullptr;
     return Reader->ReadDeclAs<T>(*F, Record, Idx);
   }
 
   IdentifierInfo *readIdentifier() {
+    if (Record.size() <= Idx) return nullptr;
     return Reader->readIdentifier(*F, Record, Idx);
   }
 
   /// Read a selector from the Record, advancing Idx.
   Selector readSelector() {
+    if (Record.size() <= Idx) return {};
     return Reader->ReadSelector(*F, Record, Idx);
   }
 
