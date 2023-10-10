@@ -4627,7 +4627,7 @@ bool Sema::addInstantiatedParametersToScope(
   unsigned FParamIdx = 0;
   for (unsigned I = 0, N = PatternDecl->getNumParams(); I != N; ++I) {
     const ParmVarDecl *PatternParam = PatternDecl->getParamDecl(I);
-    if (!PatternParam->isParameterPack()) {
+    if (!PatternParam->isParameterPack() && (FParamIdx < Function->getNumParams())) {
       // Simple case: not a parameter pack.
       assert(FParamIdx < Function->getNumParams());
       ParmVarDecl *FunctionParam = Function->getParamDecl(FParamIdx);
