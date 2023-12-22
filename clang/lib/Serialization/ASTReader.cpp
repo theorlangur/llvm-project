@@ -9213,6 +9213,11 @@ ModuleFile *ASTReader::getLocalModuleFile(ModuleFile &M, unsigned ID) const {
     // It's a module, look it up by submodule ID.
     auto I = GlobalSubmoduleMap.find(getGlobalSubmoduleID(M, ID >> 1));
     return I == GlobalSubmoduleMap.end() ? nullptr : I->second;
+  } else if (int(ID) < 0) {
+    // It's a prefix (preamble, PCH, ...). Look it up by index.
+    int IndexFromEnd = int(ID) >> 1;
+    assert(IndexFromEnd && "got reference to unknown module file");
+    return getModuleManager().pch_modules().end()[IndexFromEnd];
   } else {
     // It's a prefix (preamble, PCH, ...). Look it up by index.
     unsigned IndexFromEnd = ID >> 1;
