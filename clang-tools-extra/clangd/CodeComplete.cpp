@@ -1393,8 +1393,7 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   // However, if we're completing *inside* the preamble section of the draft,
   // overriding the preamble will break sema completion. Fortunately we can just
   // skip all includes in this case; these completions are really simple.
-  PreambleBounds PreambleRegion = Input.Preamble ?
-      ComputePreambleBounds(*CI->getLangOpts(), *ContentsBuffer, 0) : PreambleBounds(0, false);
+  PreambleBounds PreambleRegion = ComputePreambleBounds(CI->getLangOpts(), *ContentsBuffer, 0);
   bool CompletingInPreamble = Input.Preamble && (Input.Offset < PreambleRegion.Size ||
                               (!PreambleRegion.PreambleEndsAtStartOfLine &&
                                Input.Offset == PreambleRegion.Size));
