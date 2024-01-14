@@ -65,6 +65,15 @@ public:
     auto URI = toURI(File);
     if (!URI)
       return;
+#ifdef WIN32
+    auto &URIs = *URI;
+    llvm::StringRef URIref(URIs);
+    if (URIref.starts_with("file:///"))
+    {
+      auto off = sizeof("file:///") - 1;
+      URIs[off] = tolower(URIs[off]);
+    }
+#endif
     auto I = IG.try_emplace(*URI).first;
 
     auto &Node = I->getValue();
