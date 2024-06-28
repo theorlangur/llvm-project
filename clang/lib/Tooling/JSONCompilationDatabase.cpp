@@ -245,13 +245,13 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
     getCommands(it->getValue(), Commands);
     for (CompileCommand &cc : Commands) {
       StringRef ccfn = cc.Filename;
-      if (ccfn.endswith(FilePath)) 
+      if (ccfn.ends_with(FilePath)) 
         atLeastOneExactMatch = true;
       else if (withDeps) {
         for (size_t i = 0; i < cc.Dependencies.size(); ++i) {
           CompileCommand::Dependency const &d = cc.Dependencies[i];
           StringRef fn = d.Filename;
-          if (fn.endswith(FilePath)) {
+          if (fn.ends_with(FilePath)) {
             cc.DependencyIndex = (int)i;
             break;
           }

@@ -9,6 +9,7 @@
 #include "index/remote/Client.h"
 #include "support/Logger.h"
 #include "llvm/ADT/StringRef.h"
+#include "index/Index.h"
 
 namespace clang {
 namespace clangd {
