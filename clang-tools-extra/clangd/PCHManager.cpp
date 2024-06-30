@@ -327,8 +327,15 @@ llvm::StringRef findPCHDependency(const tooling::CompileCommand &CC,
         P += sizeof("-include") - 1;
         if (Arg[P] == '=')
           ++P; // skip =
-        size_t FileStart = P;
-        while ((P = Arg.find_first_of(' ', P)) != std::string::npos) {
+        size_t FileStart;
+        char endSym = ' ';
+        if (Arg[P] == '"' || Arg[P] == '\'')
+        {
+          endSym = Arg[P];
+          ++P;
+        }
+        FileStart = P;
+        while ((P = Arg.find_first_of(endSym, P)) != std::string::npos) {
           if (Arg[P - 1] != '\\')
             break;
           ++P;
