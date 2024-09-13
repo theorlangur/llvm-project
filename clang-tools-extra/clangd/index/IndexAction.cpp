@@ -200,13 +200,13 @@ public:
     if (IncludeGraphCallback != nullptr) {
 #ifndef NDEBUG
       // This checks if all nodes are initialized.
-      //for (const auto &Node : IG)
-      //  assert(Node.getKeyData() == Node.getValue().URI.data());
+      /* for (const auto &Node : IG)
+        assert(Node.getKeyData() == Node.getValue().URI.data());
         for (const auto& Node : IG)
         {
 			if (Node.getKeyData() != Node.getValue().URI.data())
 				  IG.erase(Node.getKey());
-		}
+		}*/
 #endif
       IncludeGraphCallback(std::move(IG));
     }
