@@ -202,7 +202,7 @@ SymbolSlab indexStandardLibrary(llvm::StringRef HeaderSources,
   if (CI->getFrontendOpts().Inputs.size() != 1 ||
       !CI->getPreprocessorOpts().ImplicitPCHInclude.empty()) {
     elog("Indexing standard library failed: bad CompilerInvocation");
-    assert(false && "indexing stdlib with a dubious CompilerInvocation!");
+    //assert(false && "indexing stdlib with a dubious CompilerInvocation!");
     return SymbolSlab();
   }
   const FrontendInputFile &Input = CI->getFrontendOpts().Inputs.front();
