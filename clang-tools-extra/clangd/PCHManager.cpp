@@ -729,10 +729,10 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
   auto OnExit = llvm::make_scope_exit([&] {
     if (OnProgress)
       OnProgress(Stats{++Complete, Total});
-    Item.ItemState = S;
-    Item.CV.notify_all();
     OnPCHBuilt.broadcast(
         PCHEvent{Item.CompileCommand.Filename, S == PCHItem::State::Valid});
+    Item.ItemState = S;
+    Item.CV.notify_all();
   });
 
   PCHItem *Dep = Item.IdependOn.empty() ? nullptr : Item.IdependOn[0];
