@@ -527,6 +527,9 @@ bool Lexer::getRawToken(SourceLocation Loc, Token &Result,
   if (Invalid)
     return true;
 
+  if (Buffer.size() <= LocInfo.second)
+    return true;
+
   const char *StrData = Buffer.data()+LocInfo.second;
 
   if (!IgnoreWhiteSpace && isWhitespace(SkipEscapedNewLines(StrData)[0]))
