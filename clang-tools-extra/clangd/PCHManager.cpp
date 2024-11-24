@@ -682,6 +682,33 @@ PCHManager::collectDependencies(shared_pch_item Dep,
   return PCHFS;
 }
 
+void PCHManager::makeSnapshot(shared_pch_item Item, PCHSnapshotPtr snap)
+{
+  IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS(
+      new llvm::vfs::InMemoryFileSystem());
+  snap->MemFS = PCHFS;
+  if (Item->Dynamic)
+    addDynamicGhost(Item, PCHFS);
+  {
+    auto Buf = llvm::MemoryBuffer::getMemBuffer(*snap->PCHData);
+    PCHFS->addFile(snap->Filename + ".pch", 0, std::move(Buf));
+  }
+
+  size_t n = std::min(snap->PCHItems.size(), snap->UsedPCHDatasSnapshot.size());
+  if (n != snap->PCHItems.size())
+  {
+    elog("(PCH) inconsistency between items and PCHdata. Items count={0}; Datas count={1}",
+         snap->PCHItems.size(), snap->UsedPCHDatasSnapshot.size());
+  }
+  for (size_t i = 0; i < n; ++i)
+  {
+    auto &d = snap->PCHItems[i];
+    auto &b = snap->UsedPCHDatasSnapshot[i];
+    auto Buf = llvm::MemoryBuffer::getMemBuffer(*b);
+    PCHFS->addFile(d->CompileCommand.Filename + ".pch", 0, std::move(Buf));
+  }
+}
+
 IntrusiveRefCntPtr<llvm::vfs::FileSystem>
 PCHManager::addDependencies(shared_pch_item Dep,
                             IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, 
@@ -767,6 +794,22 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
              Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
         return;
   }
+
+  PCHSnapshotPtr depSnapshot;
+  PCHSnapshotPtr newSnapshot = std::make_shared<PCHSnapshot>();
+  newSnapshot->Filename = Item.CompileCommand.Filename;
+  if (Dep)
+  {
+      auto snap = Dep->PCHDatasSnapshot;
+      depSnapshot = snap;
+      
+      newSnapshot->PCHItems = snap->PCHItems;
+      newSnapshot->PCHItems.push_back(Dep);
+      newSnapshot->UsedPCHDatasSnapshot = snap->UsedPCHDatasSnapshot;
+      newSnapshot->UsedPCHDatasSnapshot.push_back(Dep->PCHData);
+  }
+
+
   ParseOptions Opts;
 
   ParseInputs Inputs;
@@ -826,11 +869,14 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
         VFS = Overlay;
   }
 
-  UsedPCHDataList UsedPCHDatas;
-  if (Dep) {
+  if (depSnapshot) {
         PreprocessorOpts.ImplicitPCHInclude =
             std::string(Dep->CompileCommand.Filename) + ".pch";
-        VFS = addDependencies(Dep, VFS, UsedPCHDatas);
+        IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
+            new llvm::vfs::OverlayFileSystem(VFS));
+
+        Overlay->pushOverlay(depSnapshot->MemFS);
+        VFS = Overlay;
   }
 
   CppFilePreambleCallbacks SerializedDeclsCollector(
@@ -965,6 +1011,9 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
       Item.DynamicIncludes = pPPSkipIncludes->takeAllowedIncludes();
   Item.updateIncludeStates(VFS);
   std::atomic_store(&Item.PCHData, newPCH);
+  newSnapshot->PCHData = newPCH;
+  makeSnapshot(ShItem, newSnapshot);
+  std::atomic_store(&Item.PCHDatasSnapshot, newSnapshot);
   S = PCHItem::State::Valid;
   log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
       Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
@@ -1112,21 +1161,22 @@ PCHManager::findDynPCH(clang::clangd::PathRef PCHFile) const {
 
   if (res)
   {
+    auto snap = res->PCHDatasSnapshot;
     auto I = res;
-    shared_lck ItemLock(res->Lock);
-    if (I->ItemState == PCHItem::State::Rebuild) {
-      // auto data = std::atomic_load(&I->PCHData);
-      //if (data->empty()) // if it's empty - we wait. If there's some old PCH
-                         // - we use it right away to avoid delays
+    if (!snap)
+    {
+      shared_lck ItemLock(res->Lock);
+      if (I->ItemState == PCHItem::State::Rebuild) {
         I->CV.wait(ItemLock,
                    [&] { return I->ItemState != PCHItem::State::Rebuild; });
+      }
+
+      if (I->ItemState == PCHItem::State::Invalid)
+        return {};
     }
-
-    if (I->ItemState == PCHItem::State::Invalid)
-      return {};
-
+    
     vlog("(findDynamicPCH) found request for {0}", PCHFile);
-    return PCHAccess(I, const_cast<PCHManager *>(this), std::move(ItemLock));
+    return PCHAccess(snap, const_cast<PCHManager *>(this));
   }
   return {};
 }
@@ -1155,21 +1205,21 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
 
   if (res)
   {
-    auto *I = &*res;
-    shared_lck ItemLock(res->Lock);
-    if (I->ItemState == PCHItem::State::Rebuild) {
-      //auto data = std::atomic_load(&I->PCHData);
-      //if (data->empty()) // if it's empty - we wait. If there's some old PCH
-                         // - we use it right away to avoid delays
+    auto snap = res->PCHDatasSnapshot;
+    auto I = res;
+    if (!snap) {
+      shared_lck ItemLock(res->Lock);
+      if (I->ItemState == PCHItem::State::Rebuild) {
         I->CV.wait(ItemLock,
                    [&] { return I->ItemState != PCHItem::State::Rebuild; });
+      }
+
+      if (I->ItemState == PCHItem::State::Invalid)
+        return {};
     }
 
-    if (I->ItemState == PCHItem::State::Invalid)
-      return {};
-
     vlog("(findPCH) found request for {0}", PCHFile);
-    return PCHAccess(res, const_cast<PCHManager *>(this), std::move(ItemLock));
+    return PCHAccess(snap, const_cast<PCHManager *>(this));
   }
   return {};
 }
@@ -1178,19 +1228,19 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
 bool PCHManager::PCHAccess::addPCH(
     CompilerInvocation *CI,
     IntrusiveRefCntPtr<llvm::vfs::FileSystem> &VFS) const {
-  if (Item) {
+  if (itemSnapshot) {
     auto &pp = CI->getPreprocessorOpts();
     pp.AllowPCHWithCompilerErrors = true;
     pp.DisablePCHOrModuleValidation =
         DisableValidationForModuleKind::PCH;
     pp.UsePredefines = false;
     pp.ImplicitPCHInclude =
-        std::string(Item->CompileCommand.Filename) + ".pch";
+        std::string(itemSnapshot->Filename) + ".pch";
 
     IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
         new llvm::vfs::OverlayFileSystem(VFS));
 
-    Overlay->pushOverlay(PCHSnapshotMemFS);
+    Overlay->pushOverlay(itemSnapshot->MemFS);
     VFS = Overlay;
     return true;
   }
@@ -1202,16 +1252,21 @@ PCHManager::PCHAccess::PCHAccess(shared_pch_item ShItem, PCHManager *pMgr,
                                  shared_lck itemLock)
     : ShItem(ShItem), Item(ShItem.get()), pManager(pMgr), ItemReadLock(std::move(itemLock)) {
     ++Item->InUse;
-  PCHSnapshotMemFS = collectDependencies(ShItem, UsedPCHDatas);
+    itemSnapshot = ShItem->PCHDatasSnapshot;
+}
+
+PCHManager::PCHAccess::PCHAccess(PCHSnapshotPtr itemSnapshot, PCHManager *pMgr)
+    : pManager(pMgr), itemSnapshot(itemSnapshot) 
+{
+
 }
 
 PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : 
     ShItem(std::move(Rhs.ShItem)), 
     Item(Rhs.Item), 
-    UsedPCHDatas(std::move(Rhs.UsedPCHDatas)), 
     pManager(Rhs.pManager),
     ItemReadLock(std::move(Rhs.ItemReadLock)),
-    PCHSnapshotMemFS(std::move(Rhs.PCHSnapshotMemFS))
+    itemSnapshot(std::move(Rhs.itemSnapshot))
 {
   Rhs.Item = nullptr;
 }
@@ -1223,10 +1278,9 @@ PCHManager::PCHAccess::~PCHAccess() {
 PCHManager::PCHAccess &PCHManager::PCHAccess::operator=(PCHAccess &&Rhs) {
   Item = Rhs.Item;
   Rhs.Item = nullptr;
-  UsedPCHDatas = std::move(Rhs.UsedPCHDatas);
-  PCHSnapshotMemFS = std::move(Rhs.PCHSnapshotMemFS);
   ShItem = std::move(Rhs.ShItem);
   ItemReadLock = std::move(Rhs.ItemReadLock);
+  itemSnapshot = std::move(Rhs.itemSnapshot);
   return *this;
 }
 
