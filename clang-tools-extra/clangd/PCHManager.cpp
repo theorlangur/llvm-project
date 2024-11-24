@@ -393,11 +393,14 @@ void PCHManager::analyzePCHDependencies(
     DynamicPCHs.clear();
   }
 
-  uniq_lck ExclusiveAccessToPCH(PCHLock);
-  // need to invalidate everything
-  for (auto &I : PCHs)
-    I->invalidate(ExclusiveAccessToPCH, true);//here we DO need to wait till usage is over
+  {
+    shared_lck ReadAccessToPCH(PCHLock);
+    // need to invalidate everything
+    for (auto &I : PCHs)
+      I->invalidate(); // here we DO need to wait till usage is over
+  }
 
+  uniq_lck ExclusiveAccessToPCH(PCHLock);
   // removing
   PCHs.clear();
   PCHs.reserve(PCHCommands.size());
@@ -409,7 +412,7 @@ void PCHManager::analyzePCHDependencies(
                                   return findPCHDependency(CC).empty();
                                 });
   for (auto J = PCHCommands.begin(); J != NoDepIt; ++J)
-    PCHs.emplace_back(std::make_unique<PCHItem>(*J));
+    PCHs.emplace_back(std::make_shared<PCHItem>(*J));
 
   // 2. partition the rest till nothing is left
   auto PrevPartBeg = Beg;
@@ -428,7 +431,7 @@ void PCHManager::analyzePCHDependencies(
         });
 
     for (auto J = PartBeg; J != NewPartEnd; ++J) {
-      PCHs.emplace_back(std::make_unique<PCHItem>(*J));
+      PCHs.emplace_back(std::make_shared<PCHItem>(*J));
 
       llvm::StringRef DepFName = findPCHDependency(*J);
       // translate range for pchCommands into pchs
@@ -436,11 +439,11 @@ void PCHManager::analyzePCHDependencies(
       auto PCHsRangeEnd = PCHs.begin() + std::distance(Beg, PartBeg);
       // find the same PCHItem there
       auto Dep = std::find_if(PCHsRangeBeg, PCHsRangeEnd,
-                              [&](const std::unique_ptr<PCHItem> &XX) {
+                              [&](const shared_pch_item &XX) {
                                 return XX->CompileCommand.Filename == DepFName;
                               });
-      (*Dep)->DependOnMe.push_back(&*(PCHs.back()));
-      PCHs.back()->IdependOn.push_back(&(**Dep));
+      (*Dep)->DependOnMe.push_back(PCHs.back());
+      PCHs.back()->IdependOn.push_back(*Dep);
     }
 
     PrevPartBeg = PartBeg;
@@ -448,18 +451,25 @@ void PCHManager::analyzePCHDependencies(
   }
 }
 
-unsigned PCHManager::PCHItem::invalidate(uniq_lck &Lock, bool WaitForNoUsage) {
+unsigned PCHManager::PCHItem::invalidate() {
   unsigned Res = 0;
-  if (ItemState != PCHItem::State::Rebuild) {
-    ++Res;
-    if (WaitForNoUsage && (ItemState == PCHItem::State::Valid) && (InUse > 0))
-      CV.wait(Lock, [&] { return InUse == 0; });
+  { 
+    uniq_lck fullLock(Lock);
+    if (ItemState != PCHItem::State::Rebuild) {
+      ++Res;
+      ItemState = PCHItem::State::Rebuild;
+      ++Version;
+    }
+  }
 
-    ItemState = PCHItem::State::Rebuild;
-    ++Version;
+  if (Res) {
     // all dependencies must be invalidated
-    for (PCHItem *Dep : DependOnMe)
-      Res += Dep->invalidate(Lock, WaitForNoUsage);
+    for (auto& Dep : DependOnMe)
+    {
+      auto d = Dep.lock();//make shared out of weak
+      if (d)
+        Res += d->invalidate();
+    }
   }
   return Res;
 }
@@ -519,7 +529,7 @@ unsigned PCHManager::invalidateAffectedPCH(
     return checkCase && ChangedL.contains(S);
   };
   {
-    uniq_lck ExclusiveAccessToPCH(PCHLock);
+    shared_lck ExclusiveAccessToPCH(PCHLock);
     for (auto &UI : PCHs) {
       PCHItem &Item = *UI;
       if (Item.ItemState == PCHItem::State::Rebuild)
@@ -528,7 +538,7 @@ unsigned PCHManager::invalidateAffectedPCH(
       if (CheckChanged(Item.CompileCommand.Filename)) {
         log("(PCH) invalidating {0} and all dependendents",
             Item.CompileCommand.Filename);
-        Invalidated += Item.invalidate(ExclusiveAccessToPCH, false);//don't have to wait due to shared_ptr model of PCHData
+        Invalidated += Item.invalidate();
         continue;
       }
 
@@ -539,7 +549,7 @@ unsigned PCHManager::invalidateAffectedPCH(
               Item.CompileCommand.Filename, S);
           if (Item.isIncludeStateDifferent(S, FSl))
           {
-			  Invalidated += Item.invalidate(ExclusiveAccessToPCH, false);//don't have to wait due to shared_ptr model of PCHData
+			  Invalidated += Item.invalidate();
 			  break;
           } else {
                           log("(PCH) state of {0} in PCH is the same as the "
@@ -551,7 +561,6 @@ unsigned PCHManager::invalidateAffectedPCH(
   }
 
   {
-    uniq_lck dummyLock;
     shared_lck DynLock(DynamicPCHLock);
     for (auto &I : DynamicPCHs) {
       PCHItem &Item = *I.second;
@@ -571,9 +580,8 @@ unsigned PCHManager::invalidateAffectedPCH(
                               "changed",
                               Item.CompileCommand.Filename, I);
                           if (Item.isIncludeStateDifferent(I, FSl)) {
-                            Invalidated += Item.invalidate(
-                                dummyLock,
-                                false); // don't have to wait due to shared_ptr
+                            Invalidated += Item.invalidate(); 
+                                        // don't have to wait due to shared_ptr
                                         // model of PCHData
                             break;
                           } else {
@@ -618,7 +626,7 @@ bool PCHManager::tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS)
                                 // compile commands database
     auto Item = std::make_shared<PCHItem>(CC);
     if (depAccess)
-      Item->IdependOn.push_back(const_cast<PCHItem *>(depAccess.Item));
+      Item->IdependOn.push_back(depAccess.ShItem);
     Item->Dynamic = true;
     DynamicPCHs[Cmd.Filename] = Item;
     log("(DynPCH) added dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
@@ -643,16 +651,17 @@ bool PCHManager::tryRemoveDynamicPCH(tooling::CompileCommand const &Cmd) {
   return false;
 }
 
-void PCHManager::addDynamicGhost(const PCHItem* Dep, IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS)
-{
+void PCHManager::addDynamicGhost(
+    shared_pch_item Dep,
+    IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS) {
     auto Buf = llvm::MemoryBuffer::getMemBuffer(
         "\nnamespace{};\n"); // bogus C++ content
     MemFS->addFile(Dep->CompileCommand.Filename, 0, std::move(Buf));
 }
 
 IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> 
-PCHManager::collectDependencies(const PCHItem *Dep, UsedPCHDataList &pchdatas)
-{
+PCHManager::collectDependencies(shared_pch_item Dep,
+                                UsedPCHDataList &pchdatas) {
   IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS(
       new llvm::vfs::InMemoryFileSystem());
 
@@ -664,7 +673,8 @@ PCHManager::collectDependencies(const PCHItem *Dep, UsedPCHDataList &pchdatas)
 		pchdatas.emplace_back(data);
 		auto Buf = llvm::MemoryBuffer::getMemBuffer(*data);
 		PCHFS->addFile(Dep->CompileCommand.Filename + ".pch", 0, std::move(Buf));
-		Dep = Dep->IdependOn.empty() ? nullptr : Dep->IdependOn[0];
+                Dep = Dep->IdependOn.empty() ? shared_pch_item()
+                                             : Dep->IdependOn[0];
     }else {
       elog("(PCH) empty data on dependency {0}!!! (Status: {1})", Dep->CompileCommand.Filename, (int)Dep->ItemState);
     }
@@ -673,7 +683,7 @@ PCHManager::collectDependencies(const PCHItem *Dep, UsedPCHDataList &pchdatas)
 }
 
 IntrusiveRefCntPtr<llvm::vfs::FileSystem>
-PCHManager::addDependencies(const PCHItem *Dep,
+PCHManager::addDependencies(shared_pch_item Dep,
                             IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, 
                             UsedPCHDataList &pchdatas) {
   IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS = collectDependencies(Dep, pchdatas);
@@ -724,7 +734,8 @@ PPSkipIncludes* PPSkipIncludes::CheckSkipIncludesArg(const tooling::CompileComma
   return pPPSkipIncludes;
 }
 
-void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
+void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
+  auto &Item = *ShItem;
   auto S = PCHItem::State::Invalid;
   auto OnExit = llvm::make_scope_exit([&] {
     if (OnProgress)
@@ -735,17 +746,22 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
     Item.CV.notify_all();
   });
 
-  PCHItem *Dep = Item.IdependOn.empty() ? nullptr : Item.IdependOn[0];
+  uniq_lck ThisItemFullLock(Item.Lock);
+  shared_pch_item Dep;
+  if (!Item.IdependOn.empty()) 
+      Dep = Item.IdependOn[0];
+
+  shared_lck DepReadLock = Dep ? shared_lck(Dep->Lock) : shared_lck{};
+
   if (Dep && Dep->ItemState == PCHItem::State::Rebuild) {
         elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
              "in rebuild state",
              Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
-
-        shared_lck Lock(PCHLock);
-        Dep->CV.wait(Lock,
+        Dep->CV.wait(DepReadLock,
                      [&] { return Dep->ItemState != PCHItem::State::Rebuild; });
   }
   if (Dep && Dep->ItemState != PCHItem::State::Valid) {
+    Item.ItemState = PCHItem::State::Invalid;
         elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
              "invalid",
              Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
@@ -802,7 +818,7 @@ void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
         if (Item.Dynamic) {
       IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DynamicFS(
           new llvm::vfs::InMemoryFileSystem());
-      addDynamicGhost(&Item, DynamicFS);
+      addDynamicGhost(ShItem, DynamicFS);
       Overlay->pushOverlay(DynamicFS);
         }
 
@@ -964,8 +980,8 @@ void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
     if (I->ItemState == PCHItem::State::Rebuild) {
       //rebuildPCH(*I, FS);
       Builders.emplace_back(
-          [this,It=&*I,FS]() {
-            rebuildPCH(*It, FS);
+          [this,It=I,FS]() {
+            rebuildPCH(It, FS);
           }
       );
     }
@@ -977,7 +993,7 @@ void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
     for (auto &I : DynamicPCHs) {
       if (I.second->ItemState == PCHItem::State::Rebuild) {
         Builders.emplace_back(
-            [this, It = I.second, FS]() { rebuildPCH(*It.get(), FS); });
+            [this, It = I.second, FS]() { rebuildPCH(It, FS); });
       }
     }
   }
@@ -1080,25 +1096,37 @@ PCHManager::findDynPCH(clang::clangd::PathRef PCHFile) const {
     shared_lck Lock(PCHLock);
     InitCV.wait(Lock, [&] { return Initialized.load(); });
   }
-  shared_lck Lock(DynamicPCHLock);
-  vlog("(findDynamicPCH) find request for {0}", PCHFile);
-  for (const auto &It : DynamicPCHs) {
-    auto I = It.second;
-    if (I->CompileCommand.Filename == PCHFile) {
-      if (I->ItemState == PCHItem::State::Rebuild) {
-        auto data = std::atomic_load(&I->PCHData);
-        if (data->empty()) // if it's empty - we wait. If there's some old PCH -
-                           // we use it right away to avoid delays
-          I->CV.wait(Lock,
-                     [&] { return I->ItemState != PCHItem::State::Rebuild; });
+
+  shared_pch_item res;
+  {
+    shared_lck Lock(DynamicPCHLock);
+    vlog("(findDynamicPCH) find request for {0}", PCHFile);
+    for (const auto &It : DynamicPCHs) {
+      auto I = It.second;
+      if (I->CompileCommand.Filename == PCHFile) {
+        res = I;
+        break;
       }
-
-      if (I->ItemState == PCHItem::State::Invalid)
-        return {};
-
-      vlog("(findDynamicPCH) found request for {0}", PCHFile);
-      return PCHAccess(I, const_cast<PCHManager*>(this));
     }
+  }
+
+  if (res)
+  {
+    auto I = res;
+    shared_lck ItemLock(res->Lock);
+    if (I->ItemState == PCHItem::State::Rebuild) {
+      // auto data = std::atomic_load(&I->PCHData);
+      //if (data->empty()) // if it's empty - we wait. If there's some old PCH
+                         // - we use it right away to avoid delays
+        I->CV.wait(ItemLock,
+                   [&] { return I->ItemState != PCHItem::State::Rebuild; });
+    }
+
+    if (I->ItemState == PCHItem::State::Invalid)
+      return {};
+
+    vlog("(findDynamicPCH) found request for {0}", PCHFile);
+    return PCHAccess(I, const_cast<PCHManager *>(this), std::move(ItemLock));
   }
   return {};
 }
@@ -1111,23 +1139,37 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
     shared_lck Lock(PCHLock);
     InitCV.wait(Lock, [&] { return Initialized.load(); });
   }
-  shared_lck Lock(PCHLock);
-  vlog("(findPCH) find request for {0}", PCHFile);
+  shared_pch_item res;
 
-  for (const auto &I : PCHs) {
-    if (I->CompileCommand.Filename == PCHFile) {
-      if (I->ItemState == PCHItem::State::Rebuild) {
-        auto data = std::atomic_load(&I->PCHData);
-        if (data->empty())//if it's empty - we wait. If there's some old PCH - we use it right away to avoid delays
-			I->CV.wait(Lock, [&] { return I->ItemState != PCHItem::State::Rebuild; });
+  {
+    shared_lck Lock(PCHLock);
+    vlog("(findPCH) find request for {0}", PCHFile);
+
+    for (const auto &I : PCHs) {
+      if (I->CompileCommand.Filename == PCHFile) {
+        res = I;
+        break;
       }
-
-      if (I->ItemState == PCHItem::State::Invalid)
-        return {};
-
-      vlog("(findPCH) found request for {0}", PCHFile);
-      return PCHAccess(I.get(), const_cast<PCHManager*>(this));
     }
+  }
+
+  if (res)
+  {
+    auto *I = &*res;
+    shared_lck ItemLock(res->Lock);
+    if (I->ItemState == PCHItem::State::Rebuild) {
+      //auto data = std::atomic_load(&I->PCHData);
+      //if (data->empty()) // if it's empty - we wait. If there's some old PCH
+                         // - we use it right away to avoid delays
+        I->CV.wait(ItemLock,
+                   [&] { return I->ItemState != PCHItem::State::Rebuild; });
+    }
+
+    if (I->ItemState == PCHItem::State::Invalid)
+      return {};
+
+    vlog("(findPCH) found request for {0}", PCHFile);
+    return PCHAccess(res, const_cast<PCHManager *>(this), std::move(ItemLock));
   }
   return {};
 }
@@ -1155,27 +1197,20 @@ bool PCHManager::PCHAccess::addPCH(
   return false;
 }
 
-PCHManager::PCHAccess::PCHAccess(const PCHItem *Item, PCHManager *pMgr) : Item(Item), pManager(pMgr) {
-  if (Item)
-  {
-    ++Item->InUse;
-    PCHSnapshotMemFS = collectDependencies(Item, UsedPCHDatas);
-  }
-}
 
-PCHManager::PCHAccess::PCHAccess(std::shared_ptr<PCHItem> ShItem, PCHManager *pMgr)
-    : DynItem(ShItem), Item(ShItem.get()), pManager(pMgr) {
-  if (Item) {
+PCHManager::PCHAccess::PCHAccess(shared_pch_item ShItem, PCHManager *pMgr,
+                                 shared_lck itemLock)
+    : ShItem(ShItem), Item(ShItem.get()), pManager(pMgr), ItemReadLock(std::move(itemLock)) {
     ++Item->InUse;
-    PCHSnapshotMemFS = collectDependencies(Item, UsedPCHDatas);
-  }
+  PCHSnapshotMemFS = collectDependencies(ShItem, UsedPCHDatas);
 }
 
 PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : 
-    DynItem(std::move(Rhs.DynItem)), 
+    ShItem(std::move(Rhs.ShItem)), 
     Item(Rhs.Item), 
     UsedPCHDatas(std::move(Rhs.UsedPCHDatas)), 
     pManager(Rhs.pManager),
+    ItemReadLock(std::move(Rhs.ItemReadLock)),
     PCHSnapshotMemFS(std::move(Rhs.PCHSnapshotMemFS))
 {
   Rhs.Item = nullptr;
@@ -1186,10 +1221,12 @@ PCHManager::PCHAccess::~PCHAccess() {
 }
 
 PCHManager::PCHAccess &PCHManager::PCHAccess::operator=(PCHAccess &&Rhs) {
-  std::swap(Item, Rhs.Item);
+  Item = Rhs.Item;
+  Rhs.Item = nullptr;
   UsedPCHDatas = std::move(Rhs.UsedPCHDatas);
   PCHSnapshotMemFS = std::move(Rhs.PCHSnapshotMemFS);
-  DynItem = std::move(Rhs.DynItem);
+  ShItem = std::move(Rhs.ShItem);
+  ItemReadLock = std::move(Rhs.ItemReadLock);
   return *this;
 }
 

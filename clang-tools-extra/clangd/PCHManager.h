@@ -77,6 +77,11 @@ private:
 class PCHManager {
     using FSType = IntrusiveRefCntPtr<llvm::vfs::FileSystem>;
     using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
+    using shared_lck = std::shared_lock<std::shared_timed_mutex>;
+    struct PCHItem;
+    using shared_pch_item = std::shared_ptr<PCHItem>;
+    using weak_pch_item = std::weak_ptr<PCHItem>;
+
     struct PCHItem
     {
       enum class State {Valid, Rebuild, Invalid};
@@ -94,15 +99,15 @@ class PCHManager {
       };
 
         PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
-        unsigned invalidate(uniq_lck &Lock, bool WaitForNoUsage);
+        unsigned invalidate();
 
         bool isIncludeStateDifferent(StringRef path, FSType &VFS) const;
         void updateIncludeStates(FSType &VFS);
 
         tooling::CompileCommand CompileCommand;
         std::shared_ptr<std::string> PCHData;
-        std::vector<PCHItem*> DependOnMe;
-        std::vector<PCHItem*> IdependOn;
+        std::vector<weak_pch_item> DependOnMe;
+        std::vector<shared_pch_item> IdependOn;
         IncludeStructure Includes;
         CanonicalIncludes CanonIncludes;
         llvm::StringMap<IncFileState> IncludeStates;
@@ -110,6 +115,7 @@ class PCHManager {
         int Version = 0;
         bool Dynamic = false;
         llvm::StringSet<> DynamicIncludes;
+        mutable std::shared_timed_mutex Lock;
         mutable std::atomic<unsigned> InUse{0};
         mutable std::condition_variable_any CV;
     };
@@ -126,7 +132,7 @@ public:
     std::function<void(Stats)> OnProgress;
   };
 
-  using shared_lck = std::shared_lock<std::shared_timed_mutex>;
+
   using UsedPCHDataList = std::vector<std::shared_ptr<std::string>>;
   struct PCHEvent {
     PathRef PCHPath;
@@ -156,13 +162,13 @@ public:
 
     PCHManager *getManager() const { return pManager; }
   private:
-    PCHAccess(const PCHItem *Item, PCHManager *pMgr);
-    PCHAccess(std::shared_ptr<PCHItem> ShItem, PCHManager *pMgr);
+    PCHAccess(shared_pch_item ShItem, PCHManager *pMgr, shared_lck itemLock);
 
-   std::shared_ptr<PCHItem> DynItem;
+    shared_pch_item ShItem;
     const PCHItem *Item = nullptr;
     mutable UsedPCHDataList UsedPCHDatas;
     PCHManager *pManager = nullptr;
+    shared_lck ItemReadLock;
     IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHSnapshotMemFS;
     friend class PCHManager;
   };
@@ -208,15 +214,19 @@ public:
     unsigned invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles, FSType FSl);
     void rebuildInvalidatedPCH(unsigned Tota, FSType FSl);
     void updateAllHeaders();
-    void rebuildPCH(PCHItem &Item, FSType FS);
+    void rebuildPCH(shared_pch_item Item, FSType FS);
 
-    static IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> collectDependencies(const PCHItem *Dep, UsedPCHDataList &pchdatas);
-    static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, UsedPCHDataList &pchdatas);
-    static void addDynamicGhost(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS);
+    static IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem>
+    collectDependencies(shared_pch_item Dep, UsedPCHDataList &pchdatas);
+    static IntrusiveRefCntPtr<llvm::vfs::FileSystem>
+    addDependencies(shared_pch_item Dep,
+                    IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS,
+                    UsedPCHDataList &pchdatas);
+    static void addDynamicGhost(shared_pch_item Dep, IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS);
 
     using CDBWeak = std::weak_ptr<const tooling::CompilationDatabase>;
-    using PCHItemList = std::vector<std::unique_ptr<PCHItem>>;
-    using PCHSharedItemMap = std::unordered_map<std::string, std::shared_ptr<PCHItem>>;
+    using PCHItemList = std::vector<shared_pch_item>;
+    using PCHSharedItemMap = std::unordered_map<std::string, shared_pch_item>;
 
     const GlobalCompilationDatabase &CDB;
     const ThreadsafeFS &TFS;
