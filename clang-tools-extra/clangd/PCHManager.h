@@ -81,6 +81,18 @@ class PCHManager {
     struct PCHItem;
     using shared_pch_item = std::shared_ptr<PCHItem>;
     using weak_pch_item = std::weak_ptr<PCHItem>;
+    using PCHDataType = std::shared_ptr<std::string>;
+    using UsedPCHDataList = std::vector<PCHDataType>;
+
+    struct PCHSnapshot
+    {
+      std::string Filename;
+      PCHDataType PCHData;
+      std::vector<shared_pch_item> PCHItems;
+      UsedPCHDataList UsedPCHDatasSnapshot;
+      IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS;
+    };
+    using PCHSnapshotPtr = std::shared_ptr<PCHSnapshot>;
 
     struct PCHItem
     {
@@ -118,6 +130,8 @@ class PCHManager {
         mutable std::shared_timed_mutex Lock;
         mutable std::atomic<unsigned> InUse{0};
         mutable std::condition_variable_any CV;
+
+        mutable PCHSnapshotPtr PCHDatasSnapshot;
     };
 public:
   struct Stats {
@@ -133,7 +147,6 @@ public:
   };
 
 
-  using UsedPCHDataList = std::vector<std::shared_ptr<std::string>>;
   struct PCHEvent {
     PathRef PCHPath;
     bool Success;
@@ -163,13 +176,13 @@ public:
     PCHManager *getManager() const { return pManager; }
   private:
     PCHAccess(shared_pch_item ShItem, PCHManager *pMgr, shared_lck itemLock);
+    PCHAccess(PCHSnapshotPtr itemSnapshot, PCHManager *pMgr);
 
     shared_pch_item ShItem;
     const PCHItem *Item = nullptr;
-    mutable UsedPCHDataList UsedPCHDatas;
     PCHManager *pManager = nullptr;
     shared_lck ItemReadLock;
-    IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHSnapshotMemFS;
+    PCHSnapshotPtr itemSnapshot;
     friend class PCHManager;
   };
 
@@ -218,6 +231,7 @@ public:
 
     static IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem>
     collectDependencies(shared_pch_item Dep, UsedPCHDataList &pchdatas);
+    static void makeSnapshot(shared_pch_item Item, PCHSnapshotPtr snap);
     static IntrusiveRefCntPtr<llvm::vfs::FileSystem>
     addDependencies(shared_pch_item Dep,
                     IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS,
