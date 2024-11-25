@@ -1012,6 +1012,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   Item.updateIncludeStates(VFS);
   std::atomic_store(&Item.PCHData, newPCH);
   newSnapshot->PCHData = newPCH;
+  newSnapshot->Version = Item.Version;
   makeSnapshot(ShItem, newSnapshot);
   std::atomic_store(&Item.PCHDatasSnapshot, newSnapshot);
   S = PCHItem::State::Valid;
@@ -1176,7 +1177,7 @@ PCHManager::findDynPCH(clang::clangd::PathRef PCHFile) const {
     }
     
     vlog("(findDynamicPCH) found request for {0}", PCHFile);
-    return PCHAccess(snap, const_cast<PCHManager *>(this));
+    return PCHAccess(snap, res, const_cast<PCHManager *>(this));
   }
   return {};
 }
@@ -1219,7 +1220,7 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
     }
 
     vlog("(findPCH) found request for {0}", PCHFile);
-    return PCHAccess(snap, const_cast<PCHManager *>(this));
+    return PCHAccess(snap, res, const_cast<PCHManager *>(this));
   }
   return {};
 }
@@ -1255,9 +1256,9 @@ PCHManager::PCHAccess::PCHAccess(shared_pch_item ShItem, PCHManager *pMgr,
     itemSnapshot = ShItem->PCHDatasSnapshot;
 }
 
-PCHManager::PCHAccess::PCHAccess(PCHSnapshotPtr itemSnapshot, PCHManager *pMgr)
-    : pManager(pMgr), itemSnapshot(itemSnapshot) 
-{
+PCHManager::PCHAccess::PCHAccess(PCHSnapshotPtr itemSnapshot,
+                                 shared_pch_item ShItem, PCHManager *pMgr)
+    : ShItem(ShItem), pManager(pMgr), itemSnapshot(itemSnapshot) {
 
 }
 

@@ -86,6 +86,7 @@ class PCHManager {
 
     struct PCHSnapshot
     {
+      int Version;
       std::string Filename;
       PCHDataType PCHData;
       std::vector<shared_pch_item> PCHItems;
@@ -168,15 +169,17 @@ public:
     PCHAccess& operator=(PCHAccess &&);
 
     bool addPCH(CompilerInvocation *CI, FSType &VFS) const;
-    llvm::StringRef filename() const {return Item->CompileCommand.Filename;}
-    auto version() const { return Item->Version; }
+    llvm::StringRef filename() const {
+      return itemSnapshot->Filename;
+    }
+    auto version() const { return itemSnapshot->Version; }
 
-    operator bool() const { return Item != nullptr; }
+    operator bool() const { return itemSnapshot != nullptr; }
 
     PCHManager *getManager() const { return pManager; }
   private:
     PCHAccess(shared_pch_item ShItem, PCHManager *pMgr, shared_lck itemLock);
-    PCHAccess(PCHSnapshotPtr itemSnapshot, PCHManager *pMgr);
+    PCHAccess(PCHSnapshotPtr itemSnapshot, shared_pch_item ShItem, PCHManager *pMgr);
 
     shared_pch_item ShItem;
     const PCHItem *Item = nullptr;
