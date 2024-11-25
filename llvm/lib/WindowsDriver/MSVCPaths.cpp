@@ -623,7 +623,7 @@ bool findVCToolChainViaSetupConfig(vfs::FileSystem &VFS,
   // FIXME: This really should be done once in the top-level program's main
   // function, as it may have already been initialized with a different
   // threading model otherwise.
-  sys::InitializeCOMRAII COM(sys::COMThreadingMode::SingleThreaded);
+  sys::InitializeCOMRAII COM(sys::COMThreadingMode::MultiThreaded);
   HRESULT HR;
 
   // _com_ptr_t will throw a _com_error if a COM calls fail.
