@@ -15,6 +15,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Chrono.h"
 #include "llvm/Support/Threading.h"
 #include <chrono>
 #include <memory>
@@ -113,9 +114,14 @@ class PCHManager {
 
         static std::optional<IncFileState> read(StringRef &data)
         {
+          auto read64 = [&]{
+            auto u64 = data.take_front(8);
+            data = data.drop_front(8);
+            return llvm::support::endian::read64le(u64.data());
+          };
           IncFileState res;
-          res.Size = llvm::support::endian::read64le(data.take_front(8).data());
-          uint64_t unix = llvm::support::endian::read64le(data.take_front(8).data());
+          res.Size = read64();
+          uint64_t unix = read64();
           res.ModTime = llvm::sys::toTimePoint(unix);
           return res;
         }
@@ -124,7 +130,7 @@ class PCHManager {
         {
           uint64_t sz = fs.Size;
           os.write((const char*)&sz, sizeof(sz));
-          uint64_t unixEpoch = (fs.ModTime.time_since_epoch() % std::chrono::seconds(1)).count();
+          uint64_t unixEpoch = llvm::sys::toTimeT(fs.ModTime);
           os.write((const char*)&unixEpoch, sizeof(unixEpoch));
           return os;
         }

@@ -14,7 +14,10 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Support/Chrono.h"
 #include "llvm/Support/CrashRecoveryContext.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include <algorithm>
 #include <iterator>
 #include <memory>
@@ -65,10 +68,11 @@ class PrecompilePCHConsumer : public PCHGenerator {
 public:
   PrecompilePCHConsumer(PrecompilePCHAction &Action, Preprocessor &PP,
                         ModuleCache &ModuleCache, StringRef Isysroot,
+                        const CodeGenOptions &CodeGenOpts,
                         std::unique_ptr<raw_ostream> Out)
       : PCHGenerator(PP, ModuleCache, "", Isysroot,
                      std::make_shared<PCHBuffer>(),
-                     {}/*codegenopts*/,
+                     CodeGenOpts,
                      ArrayRef<std::shared_ptr<ModuleFileExtension>>(),
                      /*AllowASTWithErrors=*/true),
         Action(Action), Out(std::move(Out)) {}
@@ -123,7 +127,7 @@ PrecompilePCHAction::CreateASTConsumer(CompilerInstance &CI, StringRef InFile) {
     Sysroot.clear();
 
   return std::make_unique<PrecompilePCHConsumer>(
-      *this, CI.getPreprocessor(), CI.getModuleCache(), Sysroot, std::move(OS));
+      *this, CI.getPreprocessor(), CI.getModuleCache(), Sysroot, CI.getCodeGenOpts(), std::move(OS));
 }
 
 class CppFilePreambleCallbacks : public PreambleCallbacks {
@@ -429,9 +433,10 @@ void PCHManager::analyzePCHDependencies(
   // removing
   PCHs.clear();
   PCHs.reserve(PCHCommands.size());
+  //using namespace std::chrono_literals;
+  //std::this_thread::sleep_for(20s);
+
   // 1. partiion PCH's with no dependencies
-  auto Beg = PCHCommands.begin();
-  auto End = PCHCommands.end();
   auto NoDepIt = std::partition(PCHCommands.begin(), PCHCommands.end(),
                                 [](const tooling::CompileCommand &CC) {
                                   return findPCHDependency(CC).empty();
@@ -440,6 +445,8 @@ void PCHManager::analyzePCHDependencies(
     PCHs.emplace_back(std::make_shared<PCHItem>(*J));
 
   // 2. partition the rest till nothing is left
+  auto Beg = PCHCommands.begin();
+  auto End = PCHCommands.end();
   auto PrevPartBeg = Beg;
   auto PartBeg = NoDepIt;
   auto NewPartEnd = NoDepIt;
@@ -506,7 +513,10 @@ bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS) const
     if (auto Status = VFS->status(path))
     {
       if (v != *Status)
-        return true;
+        {
+          elog("Include state different for {0}. Size: {1} vs {2}; Mod time: {3} vs {4}", path, v.Size, Status->getSize(), v.ModTime, Status->getLastModificationTime());
+          return true;
+        }
     }else if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
     {
       // check case
@@ -556,7 +566,7 @@ void PCHManager::PCHItem::updateIncludeStates(FSType &VFS) {
 }
 
 PCHManager::PCHItem::IncFileState::IncFileState(llvm::vfs::Status const &s)
-    : Size(s.getSize()), ModTime(s.getLastModificationTime()) {}
+    : Size(s.getSize()), ModTime(llvm::sys::toTimePoint(llvm::sys::toTimeT(s.getLastModificationTime()))) {}
 
 unsigned PCHManager::invalidateAffectedPCH(
     const std::vector<std::string> &ChangedFiles, FSType FSl) {
@@ -860,15 +870,22 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   }
 
   llvm::SmallString<128> pch_cache_path;
-  //if (auto pchCacheDir = GetPCHCacheDirFor(newSnapshot->Filename))
-  //{
-  //    auto fname = llvm::sys::path::filename(newSnapshot->Filename);
-  //    llvm::SmallString<128> pch_name(fname);
-  //    pch_name += ".pch_cache";
-  //
-  //    pch_cache_path = *pchCacheDir;
-  //    llvm::sys::path::append(pch_cache_path, pch_name);
-  //}
+  if (auto pchCacheDir = GetPCHCacheDirFor(newSnapshot->Filename))
+  {
+    llvm::StringRef pchdir = *pchCacheDir;
+    llvm::StringRef item_fn = newSnapshot->Filename;
+    while(!item_fn.starts_with(pchdir)&& !pchdir.empty())
+    {
+      pchdir = llvm::sys::path::parent_path(pchdir);
+    }
+     llvm::SmallString<128> pch_name(item_fn.drop_front(pchdir.size()));
+     pch_name += ".pch_cache";
+     std::replace(pch_name.begin(), pch_name.end(), '/', '_');
+     std::replace(pch_name.begin(), pch_name.end(), '\\', '_');
+  
+     pch_cache_path = *pchCacheDir;
+     llvm::sys::path::append(pch_cache_path, pch_name);
+  }
 
   auto origV = Item.Version;
   if (!Item.PCHDatasSnapshot && !pch_cache_path.empty())
@@ -1130,12 +1147,15 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
 
   if (!pch_cache_path.empty())
   {
+    llvm::sys::fs::create_directories(llvm::sys::path::parent_path(pch_cache_path));
     //TODO: save in cache on disk
     //TODO2: separately in background
-    llvm::writeToOutput(pch_cache_path, [&](llvm::raw_ostream &OS) {
+    auto err = llvm::writeToOutput(pch_cache_path, [&](llvm::raw_ostream &OS) {
         PCHItem::store_to(OS, Item);
         return llvm::Error::success();
     });
+    if (err)
+      elog("Couldn't save PCH cache for {0} with error {1}", pch_cache_path, err);
   }
 }
 
@@ -1190,12 +1210,19 @@ void PCHManager::PCHItem::store_to(llvm::raw_ostream &os, PCHItem const& i)
 bool PCHManager::PCHItem::read(StringRef &s, PCHItem &i, DependencyVersions &deps)
 {
   auto read32 = [&]{
-    return llvm::support::endian::read32le(s.take_front(4).data());
+    auto u32 = s.take_front(4);
+    s = s.drop_front(4);
+    return llvm::support::endian::read32le(u32.data());
   };
   auto read64 = [&]{
-    return llvm::support::endian::read64le(s.take_front(8).data());
+    auto u64 = s.take_front(8);
+    s = s.drop_front(8);
+    return llvm::support::endian::read64le(u64.data());
   };
-  auto read_str_sz = [&](size_t sz){ return std::string(s.take_front(sz).data(), sz); };
+  auto read_str_sz = [&](size_t sz){ 
+    auto x = s.take_front(sz);
+    s = s.drop_front(sz);
+    return std::string(x.data(), sz); };
   auto read_str = [&]{ return read_str_sz(read32()); };
 
   uint32_t sz = read32();

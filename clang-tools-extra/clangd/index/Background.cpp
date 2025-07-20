@@ -224,6 +224,10 @@ void BackgroundIndex::update(
     if (!AbsPath) {
       if (!IGN.URI.empty())
         elog("Failed to resolve URI: {0}", AbsPath.takeError());
+      else
+        {
+          elog("Got error on resolve URI: {0}", AbsPath.takeError());
+        }
       continue;
     }
     const auto DigestIt = ShardVersionsSnapshot.find(*AbsPath);
