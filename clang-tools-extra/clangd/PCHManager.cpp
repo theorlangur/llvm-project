@@ -63,7 +63,7 @@ private:
 
 class PrecompilePCHConsumer : public PCHGenerator {
 public:
-  PrecompilePCHConsumer(PrecompilePCHAction &Action, const Preprocessor &PP,
+  PrecompilePCHConsumer(PrecompilePCHAction &Action, Preprocessor &PP,
                         InMemoryModuleCache &ModuleCache, StringRef Isysroot,
                         std::unique_ptr<raw_ostream> Out)
       : PCHGenerator(PP, ModuleCache, "", Isysroot,
