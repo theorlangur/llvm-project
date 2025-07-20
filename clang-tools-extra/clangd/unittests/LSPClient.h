@@ -74,7 +74,6 @@ public:
   // Shorthand for common LSP methods. Relative paths are passed to testPath().
   static llvm::json::Value uri(llvm::StringRef Path);
   static llvm::json::Value documentID(llvm::StringRef Path);
-  static llvm::json::Value documentID(llvm::StringRef Path, int ver);
   void didOpen(llvm::StringRef Path, llvm::StringRef Content);
   void didChange(llvm::StringRef Path, llvm::StringRef Content);
   void didClose(llvm::StringRef Path);
