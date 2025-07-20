@@ -103,31 +103,62 @@ class PCHManager {
         size_t Size;
         llvm::sys::TimePoint<> ModTime;
 
-		IncFileState(llvm::vfs::Status const &s);
+        IncFileState() = default;
+        IncFileState(llvm::vfs::Status const &s);
 
         bool operator==(IncFileState const &rhs) const {
           return (Size == rhs.Size) && (ModTime == rhs.ModTime);
         }
         bool operator!=(IncFileState const &rhs) const { return !operator==(rhs); }
+
+        static std::optional<IncFileState> read(StringRef &data)
+        {
+          IncFileState res;
+          res.Size = llvm::support::endian::read64le(data.take_front(8).data());
+          uint64_t unix = llvm::support::endian::read64le(data.take_front(8).data());
+          res.ModTime = llvm::sys::toTimePoint(unix);
+          return res;
+        }
+
+        friend llvm::raw_ostream& operator<<(llvm::raw_ostream &os, IncFileState const& fs)
+        {
+          uint64_t sz = fs.Size;
+          os.write((const char*)&sz, sizeof(sz));
+          uint64_t unixEpoch = (fs.ModTime.time_since_epoch() % std::chrono::seconds(1)).count();
+          os.write((const char*)&unixEpoch, sizeof(unixEpoch));
+          return os;
+        }
       };
 
         PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
         unsigned invalidate();
 
         bool isIncludeStateDifferent(StringRef path, FSType &VFS) const;
+        bool isAnyIncludeStateDifferent(FSType &VFS) const;
         void updateIncludeStates(FSType &VFS);
+
+        static void store_to(llvm::raw_ostream &os, PCHItem const& i);
+
+        struct DepV
+        {
+          std::string fname;
+          uint32_t v;
+        };
+        using DependencyVersions = std::vector<DepV>;
+        static bool read(StringRef &data, PCHItem &i, DependencyVersions &deps);
 
         tooling::CompileCommand CompileCommand;
         std::shared_ptr<std::string> PCHData;
         std::vector<weak_pch_item> DependOnMe;
         std::vector<shared_pch_item> IdependOn;
-        IncludeStructure Includes;
-        CanonicalIncludes CanonIncludes;
+
+        std::vector<std::string> Includes;
         llvm::StringMap<IncFileState> IncludeStates;
+        llvm::StringSet<> DynamicIncludes;
+
         State ItemState = State::Rebuild;
         int Version = 0;
         bool Dynamic = false;
-        llvm::StringSet<> DynamicIncludes;
         mutable std::shared_timed_mutex Lock;
         mutable std::atomic<unsigned> InUse{0};
         mutable std::condition_variable_any CV;
@@ -145,6 +176,7 @@ public:
     bool StorePCHInMemory = true;
     bool WaitForInit = true;
     std::function<void(Stats)> OnProgress;
+    std::optional<std::string> WorkspaceRoot;
   };
 
 
@@ -154,7 +186,12 @@ public:
   };
   using PCHBuiltEvent = Event<PCHEvent>;
 
-  PCHManager(const GlobalCompilationDatabase &CDB, const ThreadsafeFS &TFS, ParsingCallbacks &Callbacks, const Options &Opts);
+  PCHManager(
+      const GlobalCompilationDatabase &CDB
+      , const ThreadsafeFS &TFS
+      , ParsingCallbacks &Callbacks
+      , const Options &Opts
+      );
   ~PCHManager();
 
   class PCHAccess 
@@ -188,6 +225,8 @@ public:
     PCHSnapshotPtr itemSnapshot;
     friend class PCHManager;
   };
+
+  std::optional<std::string> GetPCHCacheDirFor(PathRef File) const;
 
   void checkChangedFile(PathRef File, FSType FS);
 
@@ -263,6 +302,8 @@ public:
 
     PCHSharedItemMap DynamicPCHs;
     mutable std::shared_timed_mutex DynamicPCHLock;
+
+    std::optional<std::string> WorkspaceRoot;
 
     using clock_t = std::chrono::steady_clock;
     using time_point_t = std::chrono::time_point<clock_t>;

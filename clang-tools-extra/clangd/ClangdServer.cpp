@@ -246,6 +246,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
     }
   };
   PCHOpts.WaitForInit = Opts.PCHAlwaysWait;
+  PCHOpts.WorkspaceRoot = Opts.WorkspaceRoot;
   PrecompiledHeaderMgr = std::make_unique<PCHManager>(CDB, TFS, *ParseCB, PCHOpts);
   PCHWasBuild = PrecompiledHeaderMgr->watch([this](PCHManager::PCHEvent const &E) {
 	vlog("PCH was built: {0}; Success: {1}", E.PCHPath, E.Success);

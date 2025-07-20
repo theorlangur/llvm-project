@@ -394,7 +394,7 @@ scanPreamble(llvm::StringRef Contents, const tooling::CompileCommand &Cmd) {
   if (llvm::Error Err = Action.Execute())
     return std::move(Err);
   Action.EndSourceFile();
-  SP.Includes = std::move(Includes.MainFileIncludes);
+ SP.Includes = std::move(Includes.MainFileIncludes);
   llvm::append_range(SP.Lines, llvm::split(Contents, "\n"));
   return SP;
 }

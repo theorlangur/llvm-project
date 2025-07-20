@@ -178,7 +178,8 @@ private:
 
 PCHManager::PCHManager(const GlobalCompilationDatabase &CDB,
                        const ThreadsafeFS &TFS, ParsingCallbacks &Callbacks,
-                       const Options &Opts)
+                       const Options &Opts
+                       )
     : CDB(CDB), TFS(TFS), Callbacks(Callbacks),
       OnProgress(std::move(Opts.OnProgress)),
       CommandsChanged(
@@ -189,7 +190,9 @@ PCHManager::PCHManager(const GlobalCompilationDatabase &CDB,
           [&](const std::vector<tooling::CompileCommand> &PCHAnnounced) {
             enqueue(PCHAnnounced);
           })),
-      WaitForInit(Opts.WaitForInit) {
+      WaitForInit(Opts.WaitForInit),
+      WorkspaceRoot(Opts.WorkspaceRoot)
+{
   ThreadPool.runAsync("pch-worker",
                       [this, Ctx(Context::current().clone())]() mutable {
                         WithContext BGContext(std::move(Ctx));
@@ -236,6 +239,27 @@ PCHQueue::Task PCHManager::checkChangedPeriodically()
   return T;
 }
 
+std::optional<std::string> PCHManager::GetPCHCacheDirFor(PathRef File) const
+{
+  if (auto PI = CDB.getProjectInfo(File)) {
+    llvm::SmallString<128> StorageDir;
+    StorageDir = PI->SourceRoot;
+    auto cacheDir = PI->ClangdCacheDir;
+    if (cacheDir.empty()) cacheDir = "clangd";
+    llvm::sys::path::append(StorageDir, ".cache", cacheDir.c_str(), "pch");
+    return std::string(StorageDir.c_str());
+  }else if (WorkspaceRoot)
+  {
+    llvm::SmallString<128> StorageDir;
+    StorageDir = *WorkspaceRoot;
+    auto cacheDir = PI->ClangdCacheDir;
+    if (cacheDir.empty()) cacheDir = "clangd";
+    llvm::sys::path::append(StorageDir, ".cache", cacheDir.c_str(), "pch");
+    return std::string(StorageDir.c_str());
+  }
+  return {};
+}
+
 void PCHManager::checkChangedFile(PathRef File, FSType FS) {
   if (!Initialized)
   {
@@ -272,7 +296,7 @@ void PCHManager::updateAllHeaders() {
   {
     shared_lck SharedAccessToPCH(PCHLock);
     for (auto const &I : PCHs) {
-      auto const &Headers = I->Includes.allHeaders();
+      auto const &Headers = I->Includes;
       NewAllHeaders.insert(Headers.begin(), Headers.end());
       NewAllHeaders.insert(I->CompileCommand.Filename);
     }
@@ -475,6 +499,31 @@ unsigned PCHManager::PCHItem::invalidate() {
   return Res;
 }
 
+bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS) const
+{
+  for(auto const& [path, v] : IncludeStates)
+  {
+    if (auto Status = VFS->status(path))
+    {
+      if (v != *Status)
+        return true;
+    }else if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
+    {
+      // check case
+      std::string t = path.str();
+      t[0] = std::toupper(path[0]);
+      if (t[0] == path[0])
+        t[0] = std::tolower(path[0]);
+      if (auto Status = VFS->status(t))
+      {
+        if (v != *Status)
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
                                                   FSType &VFS) const {
   if (auto I = IncludeStates.find(path); I != IncludeStates.end()) {
@@ -495,7 +544,7 @@ bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
 }
 
 void PCHManager::PCHItem::updateIncludeStates(FSType &VFS) {
-  for (const auto &I : Includes.allHeaders()) {
+  for (const auto &I : Includes) {
     if (auto S = VFS->status(I))
       IncludeStates.insert_or_assign(I, *S);
   }
@@ -543,7 +592,7 @@ unsigned PCHManager::invalidateAffectedPCH(
         continue;
       }
 
-      for (const auto &S : Item.Includes.allHeaders()) {
+      for (const auto &S : Item.Includes) {
         if (CheckChanged(S)){
           log("(PCH) invalidating {0} and all dependendents because"
               " of the included (possible indirectly) {1} has changed",
@@ -810,6 +859,71 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
       newSnapshot->UsedPCHDatasSnapshot.push_back(Dep->PCHData);
   }
 
+  llvm::SmallString<128> pch_cache_path;
+  //if (auto pchCacheDir = GetPCHCacheDirFor(newSnapshot->Filename))
+  //{
+  //    auto fname = llvm::sys::path::filename(newSnapshot->Filename);
+  //    llvm::SmallString<128> pch_name(fname);
+  //    pch_name += ".pch_cache";
+  //
+  //    pch_cache_path = *pchCacheDir;
+  //    llvm::sys::path::append(pch_cache_path, pch_name);
+  //}
+
+  auto origV = Item.Version;
+  if (!Item.PCHDatasSnapshot && !pch_cache_path.empty())
+  {
+    //no PCH data yet. Try loading one from cache
+    if (llvm::sys::fs::exists(pch_cache_path))
+    {
+      auto Buffer = llvm::MemoryBuffer::getFile(pch_cache_path);
+      if (Buffer)
+      {
+        auto b = Buffer->get()->getBuffer();
+        PCHItem::DependencyVersions depsV;
+        if (PCHItem::read(b, Item, depsV))
+        {
+          //verify if still valid based on stats
+          auto vfs = TFS.view(Item.CompileCommand.Directory);
+          bool diff = depsV.size() != Item.IdependOn.size();
+          if (!diff && Item.isAnyIncludeStateDifferent(vfs))
+            diff = true;
+          if (!diff)
+          {
+            for(int i = 0, n = (int)depsV.size(); i < n; ++i)
+            {
+              auto d = Item.IdependOn[i];
+              if (d->CompileCommand.Filename != depsV[i].fname || uint32_t(d->Version) != depsV[i].v)
+              {
+                diff = true;
+                break;
+              }
+            }
+
+            if (!diff)
+            {
+              //actually can be used
+              newSnapshot->PCHData = Item.PCHData;
+              newSnapshot->Version = Item.Version;
+              makeSnapshot(ShItem, newSnapshot);
+              std::atomic_store(&Item.PCHDatasSnapshot, newSnapshot);
+              S = PCHItem::State::Valid;
+              log("(PCH)Successfully loaded from cache precompiled header of size: {0} (file: {1}; Version: {2})",
+                  Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
+              return;
+            }
+          }
+
+          if (diff)
+          {
+            ++Item.Version;
+            if (Item.Version == origV)
+              ++Item.Version;
+          }
+        }
+      }
+    }
+  }
 
   ParseOptions Opts;
 
@@ -937,7 +1051,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   }
 
   if (Clang->getFrontendOpts().Inputs.size() != 1 ||
-      Clang->getFrontendOpts().Inputs[0].getKind().getFormat() !=
+      Clang->getFrontendOpts().Inputs[ 0].getKind().getFormat() !=
           InputKind::Source ||
       Clang->getFrontendOpts().Inputs[0].getKind().getLanguage() ==
           Language::LLVM_IR) {
@@ -1000,8 +1114,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
              "but didn't encounter",
              Item.CompileCommand.Filename, pPPSkipIncludes->GetTarget());
 
-  Item.Includes = SerializedDeclsCollector.takeIncludes();
-  Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
+  Item.Includes = SerializedDeclsCollector.takeIncludes().takeAllHeaders();
 
   if (Item.Dynamic && pPPSkipIncludes)
       Item.DynamicIncludes = pPPSkipIncludes->takeAllowedIncludes();
@@ -1014,6 +1127,107 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   S = PCHItem::State::Valid;
   log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
       Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
+
+  if (!pch_cache_path.empty())
+  {
+    //TODO: save in cache on disk
+    //TODO2: separately in background
+    llvm::writeToOutput(pch_cache_path, [&](llvm::raw_ostream &OS) {
+        PCHItem::store_to(OS, Item);
+        return llvm::Error::success();
+    });
+  }
+}
+
+void PCHManager::PCHItem::store_to(llvm::raw_ostream &os, PCHItem const& i)
+{
+    auto writeStr = [&os](llvm::StringRef s)
+    {
+      uint32_t sz = s.size();
+      os.write((const char*)&sz, sizeof(sz));
+      os.write(s.data(), sz);
+    };
+
+    auto writeGen = [&os](auto v)
+    {
+      os.write((const char*)&v, sizeof(v));
+    };
+
+
+    uint32_t sz;
+    writeGen(sz = i.Version);
+    sz = i.Includes.size();
+    writeGen(sz);
+    for(auto const& v : i.Includes)
+      writeStr(v);
+
+    sz = i.DynamicIncludes.size();
+    writeGen(sz);
+    for(auto const& v : i.DynamicIncludes)
+      writeStr(v.first());
+
+    sz = i.IncludeStates.size();
+    writeGen(sz);
+    for(auto const& [k, v] : i.IncludeStates)
+    {
+      writeStr(k);
+      os << v;
+    }
+
+    uint32_t iDepOnsz = i.IdependOn.size();
+    writeGen(iDepOnsz);
+    for(auto &d : i.IdependOn)
+    {
+      writeStr(d->CompileCommand.Filename);
+      uint32_t v = d->Version;
+      os.write((const char*)&v, sizeof(v));
+    }
+
+    writeStr(*i.PCHData);
+    os.flush();
+}
+
+bool PCHManager::PCHItem::read(StringRef &s, PCHItem &i, DependencyVersions &deps)
+{
+  auto read32 = [&]{
+    return llvm::support::endian::read32le(s.take_front(4).data());
+  };
+  auto read64 = [&]{
+    return llvm::support::endian::read64le(s.take_front(8).data());
+  };
+  auto read_str_sz = [&](size_t sz){ return std::string(s.take_front(sz).data(), sz); };
+  auto read_str = [&]{ return read_str_sz(read32()); };
+
+  uint32_t sz = read32();
+  i.Version = sz;
+
+  sz = read32();
+  i.Includes.resize(sz);
+  for(auto &s : i.Includes)
+    s = read_str();
+
+  i.DynamicIncludes.clear();
+  for(size_t j = 0, n = read32(); j < n; ++j)
+    i.DynamicIncludes.insert(read_str());
+
+  i.IncludeStates.clear();
+  for(size_t j = 0, n = read32(); j < n; ++j)
+  {
+    auto k = read_str();
+    i.IncludeStates[k] = *IncFileState::read(s);
+  }
+
+  sz = read32();
+  deps.resize(sz);
+  for(uint32_t j = 0; j < sz; ++j)
+  {
+    auto n = read_str();
+    auto v = read32();
+    deps[j] = {std::move(n), v };
+  }
+
+  i.PCHData = std::make_shared<std::string>(read_str());
+  return true;
 }
 
 void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
