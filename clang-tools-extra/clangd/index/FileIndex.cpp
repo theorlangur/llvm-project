@@ -46,12 +46,12 @@ namespace {
 SlabTuple indexSymbols(ASTContext &AST, Preprocessor &PP,
                        llvm::ArrayRef<Decl *> DeclsToIndex,
                        const MainFileMacros *MacroRefsToIndex,
-                       const include_cleaner::PragmaIncludes &PI,
+                       const include_cleaner::PragmaIncludes *PI,
                        bool IsIndexMainAST, llvm::StringRef Version,
                        bool CollectMainFileRefs, SymbolOrigin Origin) {
   SymbolCollector::Options CollectorOpts;
   CollectorOpts.CollectIncludePath = true;
-  CollectorOpts.PragmaIncludes = &PI;
+  CollectorOpts.PragmaIncludes = PI;
   CollectorOpts.CountReferences = false;
   CollectorOpts.Origin = Origin;
   CollectorOpts.CollectMainFileRefs = CollectMainFileRefs;
@@ -236,7 +236,7 @@ SlabTuple indexHeaderSymbols(llvm::StringRef Version, ASTContext &AST,
       AST.getTranslationUnitDecl()->decls().begin(),
       AST.getTranslationUnitDecl()->decls().end());
   return indexSymbols(AST, PP, DeclsToIndex,
-                      /*MainFileMacros=*/nullptr, PI,
+                      /*MainFileMacros=*/nullptr, &PI,
                       /*IsIndexMainAST=*/false, Version,
                       /*CollectMainFileRefs=*/false, Origin);
 }
