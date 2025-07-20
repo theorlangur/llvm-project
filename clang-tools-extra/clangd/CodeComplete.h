@@ -18,6 +18,7 @@
 #include "ASTSignals.h"
 #include "Compiler.h"
 #include "Config.h"
+#include "PCHManager.h"
 #include "Protocol.h"
 #include "Quality.h"
 #include "index/Index.h"
@@ -291,13 +292,15 @@ struct SpeculativeFuzzyFind {
 CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
                                 const PreambleData *Preamble,
                                 const ParseInputs &ParseInput,
+                                PCHManager::PCHAccess PCH,
                                 CodeCompleteOptions Opts,
                                 SpeculativeFuzzyFind *SpecFuzzyFind = nullptr);
 
 /// Get signature help at a specified \p Pos in \p FileName.
 SignatureHelp signatureHelp(PathRef FileName, Position Pos,
-                            const PreambleData &Preamble,
+                            const PreambleData *Preamble,
                             const ParseInputs &ParseInput,
+                            PCHManager::PCHAccess PCH,
                             MarkupKind DocumentationFormat);
 
 // For index-based completion, we only consider:

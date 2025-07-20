@@ -542,8 +542,8 @@ public:
       {
         if (cc.DependencyIndex >= 0)
         {
+          cc.ApplyDependency(cc.Dependencies[cc.DependencyIndex]);
           CompileCommand trans = TransferableCommand(cc).transferTo(Filename);
-          trans.ApplyDependency(cc.Dependencies[cc.DependencyIndex]);
           cc = trans;
           llvm::errs() << "Found dependency to apply for " << Filename << ". (Dep: " << cc.Dependencies[cc.DependencyIndex].Filename << ") ";
         }
@@ -560,12 +560,12 @@ public:
       return {};
 
     CompileCommand &proxy = ProxyCommands[0];
-    CompileCommand trans = TransferableCommand(proxy).transferTo(Filename);
     if (proxy.DependencyIndex >= 0)
     {
-      trans.ApplyDependency(proxy.Dependencies[proxy.DependencyIndex]);
+      proxy.ApplyDependency(proxy.Dependencies[proxy.DependencyIndex]);
       llvm::errs() << "Found dependency to apply for proxy " << Filename << ". (Dep: " << proxy.Dependencies[proxy.DependencyIndex].Filename << ") ";
     }
+    CompileCommand trans = TransferableCommand(proxy).transferTo(Filename);
 
     return {trans};
   }
@@ -580,6 +580,14 @@ public:
 
   std::vector<CompileCommand> getAllCompileCommands() const override {
     return Inner->getAllCompileCommands();
+  }
+
+  std::vector<std::string> getAllPCHFiles() const override {
+    return Inner->getAllPCHFiles();
+  }
+
+  std::vector<CompileCommand> getAllPCHCompileCommands() const override {
+    return Inner->getAllPCHCompileCommands();
   }
 
 private:
