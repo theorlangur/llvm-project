@@ -64,10 +64,11 @@ private:
 class PrecompilePCHConsumer : public PCHGenerator {
 public:
   PrecompilePCHConsumer(PrecompilePCHAction &Action, Preprocessor &PP,
-                        InMemoryModuleCache &ModuleCache, StringRef Isysroot,
+                        ModuleCache &ModuleCache, StringRef Isysroot,
                         std::unique_ptr<raw_ostream> Out)
       : PCHGenerator(PP, ModuleCache, "", Isysroot,
                      std::make_shared<PCHBuffer>(),
+                     {}/*codegenopts*/,
                      ArrayRef<std::shared_ptr<ModuleFileExtension>>(),
                      /*AllowASTWithErrors=*/true),
         Action(Action), Out(std::move(Out)) {}
@@ -839,8 +840,8 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   StoreDiags CompilerInvocationDiagConsumer;
   std::vector<std::string> CC1Args;
 
-  std::unique_ptr<CompilerInvocation> Invocation =
-      buildCompilerInvocation(Inputs, CompilerInvocationDiagConsumer, &CC1Args);
+  std::shared_ptr<CompilerInvocation> Invocation = std::shared_ptr<CompilerInvocation>(
+      buildCompilerInvocation(Inputs, CompilerInvocationDiagConsumer, &CC1Args).release());
   if (!CC1Args.empty())
         log("(PCH)Driver produced command: cc1 {0}", printArgv(CC1Args));
 
@@ -918,21 +919,16 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
                        [&](const auto &L) { L->sawDiagnostic(D, Diag); });
       });
   llvm::IntrusiveRefCntPtr<DiagnosticsEngine> PreambleDiagsEngine =
-      CompilerInstance::createDiagnostics(&Invocation->getDiagnosticOpts(),
-                                          &PreambleDiagnostics, false);
-
-  std::shared_ptr<PCHContainerOperations> PCHContainerOps =
-      std::make_shared<PCHContainerOperations>();
+      CompilerInstance::createDiagnostics(*VFS, Invocation->getDiagnosticOpts(),
+                                          &PreambleDiagnostics, false, nullptr);
 
   // Create the compiler instance to use for building the precompiled preamble.
-  std::unique_ptr<CompilerInstance> Clang(
-      new CompilerInstance(std::move(PCHContainerOps)));
+  std::unique_ptr<CompilerInstance> Clang(new CompilerInstance(Invocation, std::make_shared<PCHContainerOperations>(), nullptr));
 
   // Recover resources if we crash before exiting this method.
   llvm::CrashRecoveryContextCleanupRegistrar<CompilerInstance> CICleanup(
       Clang.get());
 
-  Clang->setInvocation(std::move(Invocation));
   Clang->setDiagnostics(&*PreambleDiagsEngine);
   if (!Clang->createTarget()) {
         elog("(PCH)Failed to create clang traget for {0}",

@@ -1444,8 +1444,8 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
   Clang->getPreprocessorOpts().SingleFileParseMode = CompletingInPreamble;// || Input.PCH;
   Clang->setCodeCompletionConsumer(Consumer.release());
 
-  if (Input.Preamble.RequiredModules)
-    Input.Preamble.RequiredModules->adjustHeaderSearchOptions(Clang->getHeaderSearchOpts());
+  if (Input.Preamble && Input.Preamble->RequiredModules)
+    Input.Preamble->RequiredModules->adjustHeaderSearchOptions(Clang->getHeaderSearchOpts());
 
   SyntaxOnlyAction Action;
   if (!Action.BeginSourceFile(*Clang, Clang->getFrontendOpts().Inputs[0])) {
