@@ -882,6 +882,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
      pch_name += ".pch_cache";
      std::replace(pch_name.begin(), pch_name.end(), '/', '_');
      std::replace(pch_name.begin(), pch_name.end(), '\\', '_');
+     std::replace(pch_name.begin(), pch_name.end(), ':', '_');
   
      pch_cache_path = *pchCacheDir;
      llvm::sys::path::append(pch_cache_path, pch_name);
