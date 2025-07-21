@@ -226,7 +226,8 @@ void BackgroundIndex::update(
         elog("Failed to resolve URI: {0}", AbsPath.takeError());
       else
         {
-          elog("Got error on resolve URI: {0}", AbsPath.takeError());
+          (void)AbsPath.takeError();
+          //elog("Got error on resolve URI: {0}", AbsPath.takeError());
         }
       continue;
     }
