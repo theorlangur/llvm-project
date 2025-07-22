@@ -521,9 +521,20 @@ bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS) const
     {
       // check case
       std::string t = path.str();
+      if (auto Status = VFS->status(t))
+      {
+        if (v == *Status)
+          continue;
+      }
       t[0] = std::toupper(path[0]);
+      if (auto Status = VFS->status(t))
+      {
+        if (v == *Status)
+          continue;
+      }
       if (t[0] == path[0])
         t[0] = std::tolower(path[0]);
+
       if (auto Status = VFS->status(t))
       {
         if (v != *Status)
@@ -554,6 +565,7 @@ bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
 }
 
 void PCHManager::PCHItem::updateIncludeStates(FSType &VFS) {
+  IncludeStates.clear();
   for (const auto &I : Includes) {
     if (auto S = VFS->status(I))
       IncludeStates.insert_or_assign(I, *S);
@@ -934,6 +946,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
 
           if (diff)
           {
+              log("(PCH)Could not use cache file at {0} for {1}", pch_cache_path, Item.CompileCommand.Filename);
             ++Item.Version;
             if (Item.Version == origV)
               ++Item.Version;
@@ -1151,12 +1164,21 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
     llvm::sys::fs::create_directories(llvm::sys::path::parent_path(pch_cache_path));
     //TODO: save in cache on disk
     //TODO2: separately in background
+    llvm::sys::fs::remove(pch_cache_path);
     auto err = llvm::writeToOutput(pch_cache_path, [&](llvm::raw_ostream &OS) {
         PCHItem::store_to(OS, Item);
         return llvm::Error::success();
     });
     if (err)
-      elog("Couldn't save PCH cache for {0} with error {1}", pch_cache_path, err);
+      elog("(PCH)Couldn't save PCH cache for {0} with error {1}", pch_cache_path, err);
+    else
+    {
+      log("(PCH)Saved cache file at {0} for {1}", pch_cache_path, Item.CompileCommand.Filename);
+      if (Item.isAnyIncludeStateDifferent(VFS))
+      {
+        elog("(PCH)Sanity check for PCH cache for {0} ({1}) failed. (diffs)", pch_cache_path, Item.CompileCommand.Filename);
+      }
+    }
   }
 }
 
