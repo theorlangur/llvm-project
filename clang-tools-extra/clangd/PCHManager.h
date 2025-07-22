@@ -234,7 +234,7 @@ public:
 
   std::optional<std::string> GetPCHCacheDirFor(PathRef File) const;
 
-  void checkChangedFile(PathRef File, FSType FS);
+  void checkChangedFile(PathRef File, FSType FS, bool force = false);
 
   PCHAccess findPCH(tooling::CompileCommand const& Cmd) const;
   PCHAccess findPCH(clang::clangd::PathRef PCHFile) const;

@@ -264,7 +264,7 @@ std::optional<std::string> PCHManager::GetPCHCacheDirFor(PathRef File) const
   return {};
 }
 
-void PCHManager::checkChangedFile(PathRef File, FSType FS) {
+void PCHManager::checkChangedFile(PathRef File, FSType FS, bool force) {
   if (!Initialized)
   {
       log("(PCH) check changed file: not initialized yet");
@@ -290,7 +290,14 @@ void PCHManager::checkChangedFile(PathRef File, FSType FS) {
   {
     std::unique_lock<std::mutex> Lock(ChangedMtx);
     ChangedLastTime = clock_t::now();
-    Changed.emplace_back(File);
+    if (!force)
+      Changed.emplace_back(File);
+    else
+    {
+      std::string f = "*";
+      f += File;
+      Changed.emplace_back(f);
+    }
     ChangedFS = FS;
   }
 }
@@ -585,20 +592,38 @@ unsigned PCHManager::invalidateAffectedPCH(
   unsigned Invalidated = 0;
   llvm::StringSet<> ChangedU;
   llvm::StringSet<> ChangedL;
+  llvm::StringSet<> ForcedU;
+  llvm::StringSet<> ForcedL;
   bool checkCase = llvm::sys::path::is_style_windows(llvm::sys::path::Style::native);
   for (auto S : ChangedFiles) {
+    bool forced = S[0] == '*';
+    if (forced)
+      S.erase(0, 1);
     if (checkCase) {
       S[0] = std::toupper(S[0]);
       ChangedU.insert(S);
+      if (forced)
+        ForcedU.insert(S);
       S[0] = std::tolower(S[0]);
       ChangedL.insert(S);
+      if (forced)
+        ForcedL.insert(S);
     } else
+    {
       ChangedU.insert(S);
+      if (forced)
+        ForcedU.insert(S);
+    }
   }
   auto CheckChanged = [&](auto const &S)->bool {
     if (ChangedU.contains(S))
       return true;
     return checkCase && ChangedL.contains(S);
+  };
+  auto CheckForced = [&](auto const &S)->bool {
+    if (ForcedU.contains(S))
+      return true;
+    return checkCase && ForcedL.contains(S);
   };
   {
     shared_lck ExclusiveAccessToPCH(PCHLock);
@@ -619,13 +644,15 @@ unsigned PCHManager::invalidateAffectedPCH(
           log("(PCH) invalidating {0} and all dependendents because"
               " of the included (possible indirectly) {1} has changed",
               Item.CompileCommand.Filename, S);
-          if (Item.isIncludeStateDifferent(S, FSl))
+          bool forced = CheckForced(S);
+          if (forced || Item.isIncludeStateDifferent(S, FSl))
           {
-			  Invalidated += Item.invalidate();
-			  break;
+              log("(PCH) state of {0} in PCH is ignored since force is requested. Invalidating ", S);
+              Invalidated += Item.invalidate();
+              break;
           } else {
-                          log("(PCH) state of {0} in PCH is the same as the "
-                              "current state in FS, so not invalidating anything...", S);
+              log("(PCH) state of {0} in PCH is the same as the "
+                  "current state in FS, so not invalidating anything...", S);
           }
         }
       }
@@ -651,7 +678,12 @@ unsigned PCHManager::invalidateAffectedPCH(
                               " of the included (possible indirectly) {1} has "
                               "changed",
                               Item.CompileCommand.Filename, I);
-                          if (Item.isIncludeStateDifferent(I, FSl)) {
+                          bool forced = CheckForced(I);
+                          if (forced || Item.isIncludeStateDifferent(I, FSl)) {
+                            log("(DynPCH) state of {0} in PCH is ignored "
+                                "since "
+                                "force is requested. Invalidating",
+                                I);
                             Invalidated += Item.invalidate(); 
                                         // don't have to wait due to shared_ptr
                                         // model of PCHData

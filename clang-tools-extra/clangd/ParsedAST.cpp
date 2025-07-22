@@ -763,7 +763,7 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
 
   auto &ModifiedASTFile = ASTDiags.getModifiedASTFile();
   if (PCHAccess && !ModifiedASTFile.empty())
-    PCHAccess->getManager()->checkChangedFile(ModifiedASTFile, VFS);
+    PCHAccess->getManager()->checkChangedFile(ModifiedASTFile, VFS, true);
   std::vector<Diag> Diags = CompilerInvocationDiags;
   // FIXME: Also skip generation of diagnostics altogether to speed up ast  // builds when we are patching a stale preamble.
   // Add diagnostics from the preamble, if any.
