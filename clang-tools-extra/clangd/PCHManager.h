@@ -103,6 +103,7 @@ class PCHManager {
       {
         size_t Size;
         llvm::sys::TimePoint<> ModTime;
+        llvm::MD5::MD5Result md5;
 
         IncFileState() = default;
         IncFileState(llvm::vfs::Status const &s);
@@ -112,35 +113,17 @@ class PCHManager {
         }
         bool operator!=(IncFileState const &rhs) const { return !operator==(rhs); }
 
-        static std::optional<IncFileState> read(StringRef &data)
-        {
-          auto read64 = [&]{
-            auto u64 = data.take_front(8);
-            data = data.drop_front(8);
-            return llvm::support::endian::read64le(u64.data());
-          };
-          IncFileState res;
-          res.Size = read64();
-          uint64_t unix = read64();
-          res.ModTime = llvm::sys::toTimePoint(unix);
-          return res;
-        }
+        bool compare(StringRef path, llvm::vfs::Status const&s);
 
-        friend llvm::raw_ostream& operator<<(llvm::raw_ostream &os, IncFileState const& fs)
-        {
-          uint64_t sz = fs.Size;
-          os.write((const char*)&sz, sizeof(sz));
-          uint64_t unixEpoch = llvm::sys::toTimeT(fs.ModTime);
-          os.write((const char*)&unixEpoch, sizeof(unixEpoch));
-          return os;
-        }
+        static std::optional<IncFileState> read(StringRef &data);
+        void write(llvm::raw_ostream &os) const;
       };
 
         PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
         unsigned invalidate();
 
-        bool isIncludeStateDifferent(StringRef path, FSType &VFS) const;
-        bool isAnyIncludeStateDifferent(FSType &VFS) const;
+        bool isIncludeStateDifferent(StringRef path, FSType &VFS);
+        bool isAnyIncludeStateDifferent(FSType &VFS);
         void updateIncludeStates(FSType &VFS);
 
         static void store_to(llvm::raw_ostream &os, PCHItem const& i);

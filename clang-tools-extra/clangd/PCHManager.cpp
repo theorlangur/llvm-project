@@ -513,17 +513,17 @@ unsigned PCHManager::PCHItem::invalidate() {
   return Res;
 }
 
-bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS) const
+bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS)
 {
-  for(auto const& [path, v] : IncludeStates)
+  for(auto& [path, v] : IncludeStates)
   {
     if (auto Status = VFS->status(path))
     {
-      if (v != *Status)
-        {
-          elog("Include state different for {0}. Size: {1} vs {2}; Mod time: {3} vs {4}", path, v.Size, Status->getSize(), v.ModTime, Status->getLastModificationTime());
-          return true;
-        }
+      if (!v.compare(path, *Status))
+      {
+        elog("Include state different for {0}. Size: {1} vs {2}; Mod time: {3} vs {4}", path, v.Size, Status->getSize(), v.ModTime, Status->getLastModificationTime());
+        return true;
+      }
     }else if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
     {
       // check case
@@ -544,7 +544,7 @@ bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS) const
 
       if (auto Status = VFS->status(t))
       {
-        if (v != *Status)
+        if (!v.compare(path, *Status))
           return true;
       }
     }
@@ -552,12 +552,35 @@ bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS) const
   return false;
 }
 
+bool PCHManager::PCHItem::IncFileState::compare(StringRef path, llvm::vfs::Status const& Status)
+{
+  if (*this != Status)
+  {
+    if (Size != Status.getSize())
+      return true;
+
+    if (md5 != llvm::MD5::MD5Result{})
+    {
+      if (auto tmd5 = llvm::sys::fs::md5_contents(path))
+      {
+        if(*tmd5 != md5)
+          return true;
+        //update ModTime to save on checks later
+        ModTime = llvm::sys::toTimePoint(llvm::sys::toTimeT(Status.getLastModificationTime()));
+        log("MD5 same, updating ModTime for {0}", path);
+      }
+    }
+  }
+  return false;
+}
+
 bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
-                                                  FSType &VFS) const {
+                                                  FSType &VFS) {
   if (auto I = IncludeStates.find(path); I != IncludeStates.end()) {
     if (auto Status = VFS->status(path))
-      return I->getValue() != *Status;
-    if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
+    {
+      return I->getValue().compare(path, *Status);
+    }else if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
     {
       // check case
       std::string t = path.str();
@@ -565,7 +588,7 @@ bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
       if (t[0] == path[0])
         t[0] = std::tolower(path[0]);
       if (auto Status = VFS->status(t))
-        return I->getValue() != *Status;
+        return I->getValue().compare(path, *Status);
     }
   }
   return false;
@@ -575,12 +598,31 @@ void PCHManager::PCHItem::updateIncludeStates(FSType &VFS) {
   IncludeStates.clear();
   for (const auto &I : Includes) {
     if (auto S = VFS->status(I))
-      IncludeStates.insert_or_assign(I, *S);
+    {
+      auto r = IncludeStates.insert_or_assign(I, *S);
+      if (auto md5 = llvm::sys::fs::md5_contents(I))
+        r.first->second.md5 = *md5;
+      else
+      {
+        r.first->second.md5 = {};
+        elog("Failed to get MD5 for {0}: {1}", I, md5.getError().message());
+      }
+    }
   }
   for (auto const &H : DynamicIncludes) {
     auto const &I = H.getKey();
     if (auto S = VFS->status(I))
-      IncludeStates.insert_or_assign(I, *S);
+    {
+      auto r = IncludeStates.insert_or_assign(I, *S);
+      if (auto md5 = llvm::sys::fs::md5_contents(I))
+        r.first->second.md5 = *md5;
+      else
+      {
+        (void)md5.getError();
+        r.first->second.md5 = {};
+        //elog("Failed to get MD5 for {0}: {1}", I, md5);
+      }
+    }
   }
 }
 
@@ -701,6 +743,31 @@ unsigned PCHManager::invalidateAffectedPCH(
     }
   }
   return Invalidated;
+}
+std::optional<PCHManager::PCHItem::IncFileState> PCHManager::PCHItem::IncFileState::read(StringRef &data)
+{
+  auto read64 = [&]{
+    auto u64 = data.take_front(8);
+    data = data.drop_front(8);
+    return llvm::support::endian::read64le(u64.data());
+  };
+  IncFileState res;
+  res.Size = read64();
+  uint64_t unix = read64();
+  res.ModTime = llvm::sys::toTimePoint(unix);
+  auto md5data = data.take_front(sizeof(md5));
+  data = data.drop_front(sizeof(md5));
+  memcpy(&*res.md5.begin(), md5data.data(), sizeof(md5));
+  return res;
+}
+
+void PCHManager::PCHItem::IncFileState::write(llvm::raw_ostream &os) const
+{
+  uint64_t sz = Size;
+  os.write((const char*)&sz, sizeof(sz));
+  uint64_t unixEpoch = llvm::sys::toTimeT(ModTime);
+  os.write((const char*)&unixEpoch, sizeof(unixEpoch));
+  os.write((const char*)md5.data(), sizeof(md5));
 }
 
 bool PCHManager::tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS) {
@@ -1194,7 +1261,6 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   if (!pch_cache_path.empty())
   {
     llvm::sys::fs::create_directories(llvm::sys::path::parent_path(pch_cache_path));
-    //TODO: save in cache on disk
     //TODO2: separately in background
     llvm::sys::fs::remove(pch_cache_path);
     auto err = llvm::writeToOutput(pch_cache_path, [&](llvm::raw_ostream &OS) {
@@ -1246,7 +1312,7 @@ void PCHManager::PCHItem::store_to(llvm::raw_ostream &os, PCHItem const& i)
     for(auto const& [k, v] : i.IncludeStates)
     {
       writeStr(k);
-      os << v;
+      v.write(os);
     }
 
     uint32_t iDepOnsz = i.IdependOn.size();
