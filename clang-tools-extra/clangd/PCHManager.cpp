@@ -1014,6 +1014,12 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   
      pch_cache_path = *pchCacheDir;
      llvm::sys::path::append(pch_cache_path, pch_name);
+
+    log("(PCH)For {0} considering cache at {1}",
+        Item.CompileCommand.Filename, pch_cache_path);
+  }else
+  {
+    log("(PCH)For {0} no cache is considered (no path)", Item.CompileCommand.Filename);
   }
 
   auto origV = Item.Version;
@@ -1278,6 +1284,15 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   S = PCHItem::State::Valid;
   log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
       Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
+
+  // {
+  //   log("(PCH)Dumping include states for {0}\r\n", Item.CompileCommand.Filename);
+  //   for(auto const& [f, s] : Item.IncludeStates)
+  //   {
+  //     log("(PCH){0} : Size={1}; Mod={2}\r\n", f, s.Size, s.ModTime);
+  //   }
+  //   log("(PCH)Dump end for {0}\r\n", Item.CompileCommand.Filename);
+  // }
 
   if (!pch_cache_path.empty())
   {
