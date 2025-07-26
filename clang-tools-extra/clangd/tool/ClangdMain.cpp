@@ -412,6 +412,13 @@ opt<bool> PCHAlwaysWait{
     init(true),
 };
 
+opt<bool> PCHDbgLog{
+    "pch-dbg-log",
+    cat(Features),
+    desc("enables extended logging for PCHManager"),
+    init(false),
+};
+
 opt<bool> Sync{
     "sync",
     cat(Misc),
@@ -925,6 +932,7 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
     break;
   }
   Opts.PCHAlwaysWait = PCHAlwaysWait;
+  Opts.PCHDbgLog = PCHDbgLog;
 
   if (!ResourceDir.empty())
     Opts.ResourceDir = ResourceDir;

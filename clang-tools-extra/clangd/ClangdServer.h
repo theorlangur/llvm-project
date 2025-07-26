@@ -198,6 +198,8 @@ public:
     //defines wether operations on TUs should wait for PCHs manager to be initialized on the start
     bool PCHAlwaysWait = true;
 
+    bool PCHDbgLog = false;
+
     explicit operator TUScheduler::Options() const;
   };
   // Sensible default options for use in tests.

@@ -166,6 +166,7 @@ public:
     bool WaitForInit = true;
     std::function<void(Stats)> OnProgress;
     std::optional<std::string> WorkspaceRoot;
+    bool DbgLog = false;
   };
 
 
@@ -282,6 +283,9 @@ public:
     GlobalCompilationDatabase::CommandChanged::Subscription CommandsChanged;
     GlobalCompilationDatabase::PCHAnnounce::Subscription PCHAnnounce;
 
+  public:
+    static bool DbgLog;
+  private:
     bool WaitForInit = true;
     std::atomic<bool> Initialized = {false};
     mutable std::condition_variable_any InitCV;

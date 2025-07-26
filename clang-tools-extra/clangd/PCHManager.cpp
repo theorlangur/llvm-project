@@ -180,6 +180,7 @@ private:
 };
 } // namespace
 
+bool PCHManager::DbgLog = false;
 PCHManager::PCHManager(const GlobalCompilationDatabase &CDB,
                        const ThreadsafeFS &TFS, ParsingCallbacks &Callbacks,
                        const Options &Opts
@@ -197,6 +198,7 @@ PCHManager::PCHManager(const GlobalCompilationDatabase &CDB,
       WaitForInit(Opts.WaitForInit),
       WorkspaceRoot(Opts.WorkspaceRoot)
 {
+  DbgLog = Opts.DbgLog;
   ThreadPool.runAsync("pch-worker",
                       [this, Ctx(Context::current().clone())]() mutable {
                         WithContext BGContext(std::move(Ctx));
@@ -230,7 +232,8 @@ PCHQueue::Task PCHManager::checkChangedPeriodically()
       auto Dms = std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - ChangedLastTime).count();
       if (Dms > 2000)
       {
-        log("(PCH) sending changed file for processing ({0} items)", Changed.size());
+        if (DbgLog)
+          log("(PCH) sending changed file for processing ({0} items)", Changed.size());
         enqueue(Changed, ChangedFS);
         Changed.clear();
         ChangedFS = nullptr;
@@ -267,7 +270,8 @@ std::optional<std::string> PCHManager::GetPCHCacheDirFor(PathRef File) const
 void PCHManager::checkChangedFile(PathRef File, FSType FS, bool force) {
   if (!Initialized)
   {
-      log("(PCH) check changed file: not initialized yet");
+      if (DbgLog)
+        log("(PCH) check changed file: not initialized yet");
       return;
   }
 
@@ -281,7 +285,8 @@ void PCHManager::checkChangedFile(PathRef File, FSType FS, bool force) {
       else
         LowerCase[0] = std::toupper(LowerCase[0]);
       if (!AllUsedHeaders.contains(LowerCase)) {
-        log("(PCH) file {0}/{1} doesn't affect any PCHs", File, LowerCase);
+        if (DbgLog)
+          log("(PCH) file {0}/{1} doesn't affect any PCHs", File, LowerCase);
         return;
       }
     }
@@ -322,7 +327,7 @@ PCHQueue::Task PCHManager::announcedPCHTask(
     const std::vector<tooling::CompileCommand> &PCHAnnounced) {
   PCHQueue::Task T([this, PCHAnnounced] {
     if (!Initialized)
-      log("(PCH) initializing ({0} announced)", PCHAnnounced.size());
+        log("(PCH) initializing ({0} announced)", PCHAnnounced.size());
     analyzePCHDependencies(std::move(PCHAnnounced));
 
     //at this point various findPCH calls are allowed
@@ -521,7 +526,8 @@ bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS)
     {
       if (!v.compare(path, *Status))
       {
-        elog("Include state different for {0}. Size: {1} vs {2}; Mod time: {3} vs {4}", path, v.Size, Status->getSize(), v.ModTime, Status->getLastModificationTime());
+        if (DbgLog)
+          elog("Include state different for {0}. Size: {1} vs {2}; Mod time: {3} vs {4}", path, v.Size, Status->getSize(), v.ModTime, Status->getLastModificationTime());
         return true;
       }
     }else if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
@@ -567,7 +573,8 @@ bool PCHManager::PCHItem::IncFileState::compare(StringRef path, llvm::vfs::Statu
           return true;
         //update ModTime to save on checks later
         ModTime = llvm::sys::toTimePoint(llvm::sys::toTimeT(Status.getLastModificationTime()));
-        log("MD5 same, updating ModTime for {0}", path);
+        if (DbgLog)
+          log("MD5 same, updating ModTime for {0}", path);
       }
     }
   }
@@ -605,7 +612,8 @@ void PCHManager::PCHItem::updateIncludeStates(FSType &VFS) {
       else
       {
         r.first->second.md5 = {};
-        elog("Failed to get MD5 for {0}: {1}", I, md5.getError().message());
+        if (DbgLog)
+          elog("Failed to get MD5 for {0}: {1}", I, md5.getError().message());
       }
     }
   }
@@ -675,26 +683,30 @@ unsigned PCHManager::invalidateAffectedPCH(
         continue;
 
       if (CheckChanged(Item.CompileCommand.Filename)) {
-        log("(PCH) invalidating {0} and all dependendents",
-            Item.CompileCommand.Filename);
+        if (DbgLog)
+          log("(PCH) invalidating {0} and all dependendents",
+              Item.CompileCommand.Filename);
         Invalidated += Item.invalidate();
         continue;
       }
 
       for (const auto &S : Item.Includes) {
         if (CheckChanged(S)){
-          log("(PCH) invalidating {0} and all dependendents because"
-              " of the included (possible indirectly) {1} has changed",
-              Item.CompileCommand.Filename, S);
+          if (DbgLog)
+            log("(PCH) invalidating {0} and all dependendents because"
+                " of the included (possible indirectly) {1} has changed",
+                Item.CompileCommand.Filename, S);
           bool forced = CheckForced(S);
           if (forced || Item.isIncludeStateDifferent(S, FSl))
           {
-              log("(PCH) state of {0} in PCH is ignored since force is requested. Invalidating ", S);
+              if (DbgLog)
+                  log("(PCH) state of {0} in PCH is ignored since force is requested. Invalidating ", S);
               Invalidated += Item.invalidate();
               break;
           } else {
-              log("(PCH) state of {0} in PCH is the same as the "
-                  "current state in FS, so not invalidating anything...", S);
+              if (DbgLog)
+                log("(PCH) state of {0} in PCH is the same as the "
+                    "current state in FS, so not invalidating anything...", S);
           }
         }
       }
@@ -715,28 +727,31 @@ unsigned PCHManager::invalidateAffectedPCH(
         for (auto const &h : Item.DynamicIncludes) {
           const auto &I = h.getKey();
           if (CheckChanged(I)){
-                          log("(DynPCH) invalidating {0} and all dependendents "
-                              "because"
-                              " of the included (possible indirectly) {1} has "
-                              "changed",
-                              Item.CompileCommand.Filename, I);
-                          bool forced = CheckForced(I);
-                          if (forced || Item.isIncludeStateDifferent(I, FSl)) {
-                            log("(DynPCH) state of {0} in PCH is ignored "
-                                "since "
-                                "force is requested. Invalidating",
-                                I);
-                            Invalidated += Item.invalidate(); 
-                                        // don't have to wait due to shared_ptr
-                                        // model of PCHData
-                            break;
-                          } else {
-                            log("(DynPCH) state of {0} in PCH is the same as "
-                                "the "
-                                "current state in FS, so not invalidating "
-                                "anything...",
-                                I);
-                          }
+            if (DbgLog)
+              log("(DynPCH) invalidating {0} and all dependendents "
+                  "because"
+                  " of the included (possible indirectly) {1} has "
+                  "changed",
+                  Item.CompileCommand.Filename, I);
+            bool forced = CheckForced(I);
+            if (forced || Item.isIncludeStateDifferent(I, FSl)) {
+              if (DbgLog)
+                log("(DynPCH) state of {0} in PCH is ignored "
+                    "since "
+                    "force is requested. Invalidating",
+                    I);
+              Invalidated += Item.invalidate(); 
+                          // don't have to wait due to shared_ptr
+                          // model of PCHData
+              break;
+            } else {
+              if (DbgLog)
+                log("(DynPCH) state of {0} in PCH is the same as "
+                    "the "
+                    "current state in FS, so not invalidating "
+                    "anything...",
+                    I);
+            }
           }
         }
       }
@@ -800,7 +815,8 @@ bool PCHManager::tryAddDynamicPCH(tooling::CompileCommand const &Cmd, FSType FS)
       Item->IdependOn.push_back(depAccess.ShItem);
     Item->Dynamic = true;
     DynamicPCHs[Cmd.Filename] = Item;
-    log("(DynPCH) added dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
+    if (DbgLog)
+      log("(DynPCH) added dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
     Queue.push(PCHQueue::Task([this, FS] { rebuildInvalidatedPCH(1, FS); }));
   }
 
@@ -816,7 +832,8 @@ bool PCHManager::tryRemoveDynamicPCH(tooling::CompileCommand const &Cmd) {
   uniq_lck Lock(DynamicPCHLock); 
 
   if (DynamicPCHs.erase(Cmd.Filename) == 1) {
-    log("(DynPCH) removed dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
+    if (DbgLog)
+      log("(DynPCH) removed dynamic PCH {0} for {1}", DynPCH, Cmd.Filename);
     return true;
   }
   return false;
@@ -1037,15 +1054,17 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
               makeSnapshot(ShItem, newSnapshot);
               std::atomic_store(&Item.PCHDatasSnapshot, newSnapshot);
               S = PCHItem::State::Valid;
-              log("(PCH)Successfully loaded from cache precompiled header of size: {0} (file: {1}; Version: {2})",
-                  Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
+              if (DbgLog)
+                log("(PCH)Successfully loaded from cache precompiled header of size: {0} (file: {1}; Version: {2})",
+                    Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
               return;
             }
           }
 
           if (diff)
           {
-              log("(PCH)Could not use cache file at {0} for {1}", pch_cache_path, Item.CompileCommand.Filename);
+              if (DbgLog)
+                log("(PCH)Could not use cache file at {0} for {1}", pch_cache_path, Item.CompileCommand.Filename);
             ++Item.Version;
             if (Item.Version == origV)
               ++Item.Version;
@@ -1079,14 +1098,15 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   CCCmdLine = std::accumulate(
       CC->CommandLine.begin(), CC->CommandLine.end(), std::string(),
       [](std::string r, std::string arg) { return r + " " + arg; });
-  log("(PCH) cmdline for {0}:\n{1}", Item.CompileCommand.Filename, CCCmdLine);
+  if (DbgLog)
+    log("(PCH) cmdline for {0}:\n{1}", Item.CompileCommand.Filename, CCCmdLine);
 
   StoreDiags CompilerInvocationDiagConsumer;
   std::vector<std::string> CC1Args;
 
   std::shared_ptr<CompilerInvocation> Invocation = std::shared_ptr<CompilerInvocation>(
       buildCompilerInvocation(Inputs, CompilerInvocationDiagConsumer, &CC1Args).release());
-  if (!CC1Args.empty())
+  if (!CC1Args.empty() && DbgLog)
         log("(PCH)Driver produced command: cc1 {0}", printArgv(CC1Args));
 
   auto &PreprocessorOpts = Invocation->getPreprocessorOpts();
@@ -1099,19 +1119,20 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
 
   auto VFS = TFS.view(Item.CompileCommand.Directory);
   if (FS) {
+      if (DbgLog)
         log("(PCH) using passed FS as overlay");
-        IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
-            new llvm::vfs::OverlayFileSystem(VFS)); // passed VFS is primary
+      IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
+          new llvm::vfs::OverlayFileSystem(VFS)); // passed VFS is primary
 
-        if (Item.Dynamic) {
-      IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DynamicFS(
-          new llvm::vfs::InMemoryFileSystem());
-      addDynamicGhost(ShItem, DynamicFS);
-      Overlay->pushOverlay(DynamicFS);
-        }
+      if (Item.Dynamic) {
+        IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DynamicFS(
+            new llvm::vfs::InMemoryFileSystem());
+        addDynamicGhost(ShItem, DynamicFS);
+        Overlay->pushOverlay(DynamicFS);
+      }
 
-        Overlay->pushOverlay(FS); // FS is the last one
-        VFS = Overlay;
+      Overlay->pushOverlay(FS); // FS is the last one
+      VFS = Overlay;
   }
 
   if (depSnapshot) {
@@ -1335,11 +1356,11 @@ bool PCHManager::PCHItem::read(StringRef &s, PCHItem &i, DependencyVersions &dep
     s = s.drop_front(4);
     return llvm::support::endian::read32le(u32.data());
   };
-  auto read64 = [&]{
-    auto u64 = s.take_front(8);
-    s = s.drop_front(8);
-    return llvm::support::endian::read64le(u64.data());
-  };
+  //auto read64 = [&]{
+  //  auto u64 = s.take_front(8);
+  //  s = s.drop_front(8);
+  //  return llvm::support::endian::read64le(u64.data());
+  //};
   auto read_str_sz = [&](size_t sz){ 
     auto x = s.take_front(sz);
     s = s.drop_front(sz);
@@ -1440,14 +1461,16 @@ bool PCHManager::hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRe
   StringRef DynPCH = findDynamicPCH(Cmd);
   if (!DynPCH.empty() && (DynPCH == PCHFile)) {
     shared_lck Lock(DynamicPCHLock);
-    log("(PCH) hasPCHInDependencies request for {0} (PCH in question: {1}); "
-        "Looking among dynamics",
-        Cmd.Filename, PCHFile);
+    if (DbgLog)
+      log("(PCH) hasPCHInDependencies request for {0} (PCH in question: {1}); "
+          "Looking among dynamics",
+          Cmd.Filename, PCHFile);
     for (const auto &I : DynamicPCHs) {
       if (I.second->CompileCommand.Filename == PCHFile) {
-        log("(PCH) hasPCHInDependencies: found for {0} (PCH in question: {1}) "
-            "among dynamics",
-            Cmd.Filename, PCHFile);
+        if (DbgLog)
+          log("(PCH) hasPCHInDependencies: found for {0} (PCH in question: {1}) "
+              "among dynamics",
+              Cmd.Filename, PCHFile);
         return true;
       }
     }
@@ -1455,16 +1478,18 @@ bool PCHManager::hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRe
   llvm::StringRef Dep = findPCHDependency(Cmd);
   if (!Dep.empty()) {
     shared_lck Lock(PCHLock);
-    log("(PCH) hasPCHInDependencies request for {0} (PCH in question: {1})",
-        Cmd.Filename, PCHFile);
+    if (DbgLog)
+      log("(PCH) hasPCHInDependencies request for {0} (PCH in question: {1})",
+          Cmd.Filename, PCHFile);
 
     for (const auto &I : PCHs) {
       if (I->CompileCommand.Filename == Dep) {
         if (I->CompileCommand.Filename == PCHFile) // reacting only on main
         {
-          log("(PCH) hasPCHInDependencies: found for {0} (PCH in question: "
-              "{1})",
-              Cmd.Filename, PCHFile);
+          if (DbgLog)
+            log("(PCH) hasPCHInDependencies: found for {0} (PCH in question: "
+                "{1})",
+                Cmd.Filename, PCHFile);
           return true;
         }
         /*
@@ -1508,7 +1533,8 @@ PCHManager::findDynPCH(clang::clangd::PathRef PCHFile) const {
   shared_pch_item res;
   {
     shared_lck Lock(DynamicPCHLock);
-    vlog("(findDynamicPCH) find request for {0}", PCHFile);
+    if (DbgLog)
+      vlog("(findDynamicPCH) find request for {0}", PCHFile);
     for (const auto &It : DynamicPCHs) {
       auto I = It.second;
       if (I->CompileCommand.Filename == PCHFile) {
@@ -1534,7 +1560,8 @@ PCHManager::findDynPCH(clang::clangd::PathRef PCHFile) const {
         return {};
     }
     
-    vlog("(findDynamicPCH) found request for {0}", PCHFile);
+    if (DbgLog)
+      vlog("(findDynamicPCH) found request for {0}", PCHFile);
     return PCHAccess(snap, res, const_cast<PCHManager *>(this));
   }
   return {};
@@ -1552,7 +1579,8 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
 
   {
     shared_lck Lock(PCHLock);
-    vlog("(findPCH) find request for {0}", PCHFile);
+    if (DbgLog)
+      vlog("(findPCH) find request for {0}", PCHFile);
 
     for (const auto &I : PCHs) {
       if (I->CompileCommand.Filename == PCHFile) {
@@ -1577,7 +1605,8 @@ PCHManager::findPCH(clang::clangd::PathRef PCHFile) const {
         return {};
     }
 
-    vlog("(findPCH) found request for {0}", PCHFile);
+    if (DbgLog)
+      vlog("(findPCH) found request for {0}", PCHFile);
     return PCHAccess(snap, res, const_cast<PCHManager *>(this));
   }
   return {};
