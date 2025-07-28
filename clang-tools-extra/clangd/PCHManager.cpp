@@ -560,25 +560,31 @@ bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS)
 
 bool PCHManager::PCHItem::IncFileState::compare(StringRef path, llvm::vfs::Status const& Status)
 {
-  if (*this != Status)
-  {
-    if (Size != Status.getSize())
-      return true;
+  if (Size != Status.getSize())
+    return false;
+  auto tModTime = llvm::sys::toTimePoint(llvm::sys::toTimeT(Status.getLastModificationTime()));
 
+  if (ModTime != tModTime)
+  {
     if (md5 != llvm::MD5::MD5Result{})
     {
       if (auto tmd5 = llvm::sys::fs::md5_contents(path))
       {
         if(*tmd5 != md5)
-          return true;
+        {
+          log("MD5 different for {0}: {1} vs {2}", path, tmd5->digest(), md5.digest());
+          return false;
+        }
         //update ModTime to save on checks later
-        ModTime = llvm::sys::toTimePoint(llvm::sys::toTimeT(Status.getLastModificationTime()));
+        ModTime = tModTime;
         if (DbgLog)
           log("MD5 same, updating ModTime for {0}", path);
+        return true;
       }
     }
+    return false;
   }
-  return false;
+  return true;
 }
 
 bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
@@ -586,7 +592,7 @@ bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
   if (auto I = IncludeStates.find(path); I != IncludeStates.end()) {
     if (auto Status = VFS->status(path))
     {
-      return I->getValue().compare(path, *Status);
+      return !I->getValue().compare(path, *Status);
     }else if (llvm::sys::path::is_style_windows(llvm::sys::path::Style::native))
     {
       // check case
@@ -595,7 +601,7 @@ bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef path,
       if (t[0] == path[0])
         t[0] = std::tolower(path[0]);
       if (auto Status = VFS->status(t))
-        return I->getValue().compare(path, *Status);
+        return !I->getValue().compare(path, *Status);
     }
   }
   return false;
