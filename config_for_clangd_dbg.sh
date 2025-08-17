@@ -1,7 +1,7 @@
 #!/bin/sh
 cmake -Hllvm -Bbuild_dbg \
-    -DCMAKE_CXX_FLAGS="-Og" \
-    -DCMAKE_C_FLAGS="-Og" \
+    -DCMAKE_CXX_FLAGS="-Og -march=x86-64-v3" \
+    -DCMAKE_C_FLAGS="-Og -march=x86-64-v3" \
     -DCMAKE_BUILD_TYPE=Debug \
     -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra" \
     -DLLVM_TARGETS_TO_BUILD="X86" \
