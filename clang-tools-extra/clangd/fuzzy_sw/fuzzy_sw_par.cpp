@@ -13,6 +13,13 @@
 
 namespace fuzzy_sw {
 using std::atomic;
+#if defined(_WIN32)
+template<class T>
+using remove_cvref_t = std::_Remove_cvref_t<T>;
+#else
+template<class T>
+using remove_cvref_t = std::__remove_cvref_t<T>;
+#endif
 
 // threading
 namespace {
@@ -576,7 +583,7 @@ template <class T> struct Span {
         //std::ranges::sort(targets, std::greater{}, &std::string_view::length);
         auto Match = [&](auto &impl)
         {
-            using simd_impl_t = std::__remove_cvref_t<decltype(impl)>;
+            using simd_impl_t = remove_cvref_t<decltype(impl)>;
             typename simd_impl_t::Context ctx{impl};
             res.reserve(targets.size());
             for(size_t i = 0, n = targets.size(); i < n; i += simd_impl_t::kWidth)
@@ -585,7 +592,7 @@ template <class T> struct Span {
                 size_t l = (i + simd_impl_t::kWidth) < n ? simd_impl_t::kWidth : (n - i);
                 for(size_t j = 0; j < l; ++j)
                     block[j] = targets[i + j];
-                auto scores = ctx.sw_score_simd(query, typename simd_impl_t::input_span_t(block.begin(), block.begin() + l));
+                auto scores = ctx.sw_score_simd(query, typename simd_impl_t::input_span_t(&*block.begin(), &*block.begin() + l));
                 for(size_t j = 0; j < l; ++j)
                     if (auto s = scores[i + j]; s > params.scoreThreshold)
                         res.emplace_back(targets[i + j], s);
@@ -612,7 +619,7 @@ template <class T> struct Span {
         //std::ranges::sort(targets, std::greater{}, &CharSource::length);
         auto Match = [&](auto &impl)
         {
-            using simd_impl_t = std::__remove_cvref_t<decltype(impl)>;
+            using simd_impl_t = remove_cvref_t<decltype(impl)>;
             typename simd_impl_t::Context ctx{impl};
             res.reserve(targets.size());
             for(size_t i = 0, n = targets.size(); i < n; i += simd_impl_t::kWidth)
@@ -621,7 +628,7 @@ template <class T> struct Span {
                 size_t l = (i + simd_impl_t::kWidth) < n ? simd_impl_t::kWidth : (n - i);
                 for(size_t j = 0; j < l; ++j)
                     block[j] = targets[i + j];
-                auto scores = ctx.sw_score_simd(query, typename simd_impl_t::input_char_src_span_t(block.begin(), block.begin() + l));
+                auto scores = ctx.sw_score_simd(query, typename simd_impl_t::input_char_src_span_t(&*block.begin(), &*block.begin() + l));
                 for(size_t j = 0; j < l; ++j)
                     if (auto s = scores[i + j]; s > params.scoreThreshold)
                         res.emplace_back(targets[i + j], s);
@@ -659,14 +666,14 @@ template <class T> struct Span {
             using simd_t = decltype(Impl::m_AVX2x8);
             m_Impl->m_WorkerFunc = &Impl::WorkerFuncTpl<simd_t, simd_t::input_char_src_t, CharSourceResult, CharSourceInput>;
             m_Impl->m_pSIMDTypeErased = &impl;
-            m_Impl->m_WorkerWidth = std::__remove_cvref_t<decltype(impl)>::kWidth;
+            m_Impl->m_WorkerWidth = remove_cvref_t<decltype(impl)>::kWidth;
         }
         else if (auto &impl = m_Impl->m_AVX2x16; impl.QueryFits(query))
         {
             using simd_t = decltype(Impl::m_AVX2x16);
             m_Impl->m_WorkerFunc = &Impl::WorkerFuncTpl<simd_t, simd_t::input_char_src_t, CharSourceResult, CharSourceInput>;
             m_Impl->m_pSIMDTypeErased = &impl;
-            m_Impl->m_WorkerWidth = std::__remove_cvref_t<decltype(impl)>::kWidth;
+            m_Impl->m_WorkerWidth = remove_cvref_t<decltype(impl)>::kWidth;
         }else
         {
             using simd_t = decltype(Impl::m_AVX2x32);
@@ -705,14 +712,14 @@ template <class T> struct Span {
             using simd_t = decltype(Impl::m_AVX2x8);
             m_Impl->m_WorkerFunc = &Impl::WorkerFuncTpl<simd_t, simd_t::input_t, Result, Input>;
             m_Impl->m_pSIMDTypeErased = &impl;
-            m_Impl->m_WorkerWidth = std::__remove_cvref_t<decltype(impl)>::kWidth;
+            m_Impl->m_WorkerWidth = remove_cvref_t<decltype(impl)>::kWidth;
         }
         else if (auto &impl = m_Impl->m_AVX2x16; impl.QueryFits(query))
         {
             using simd_t = decltype(Impl::m_AVX2x16);
             m_Impl->m_WorkerFunc = &Impl::WorkerFuncTpl<simd_t, simd_t::input_t, Result, Input>;
             m_Impl->m_pSIMDTypeErased = &impl;
-            m_Impl->m_WorkerWidth = std::__remove_cvref_t<decltype(impl)>::kWidth;
+            m_Impl->m_WorkerWidth = remove_cvref_t<decltype(impl)>::kWidth;
         }else
         {
             using simd_t = decltype(Impl::m_AVX2x32);
@@ -813,7 +820,7 @@ template <class T> struct Span {
             auto *pTo = &*beg + m;
             input_t in{};
             std::copy(pFrom, pTo, in.begin());
-            auto sp = typename simd_t::template span_for<input_t>::type{in.begin(), in.begin() + (m - i)};
+            auto sp = typename simd_t::template span_for<input_t>::type{&*in.begin(), &*in.begin() + (m - i)};
             auto scores = ctx_simd.sw_score_simd(m_Query, sp);
             for(int j = 0, tn = m - i; j < tn; ++j)
             {
