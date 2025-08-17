@@ -221,6 +221,11 @@ void MergedIndex::relations(
   });
 }
 
+size_t MergedIndex::collectAllSymbols(SymbolSimplifiedMap &Map) const
+{
+  return Dynamic->collectAllSymbols(Map) + Static->collectAllSymbols(Map);
+}
+
 // Returns true if \p L is (strictly) preferred to \p R (e.g. by file paths). If
 // neither is preferred, this returns false.
 static bool prefer(const SymbolLocation &L, const SymbolLocation &R) {

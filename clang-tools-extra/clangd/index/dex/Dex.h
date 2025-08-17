@@ -101,6 +101,7 @@ public:
 
   size_t estimateMemoryUsage() const override;
 
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
 private:
   class RevRef {
     const Ref *Reference;

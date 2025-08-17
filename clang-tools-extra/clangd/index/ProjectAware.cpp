@@ -59,6 +59,8 @@ public:
       Tasks = std::make_unique<AsyncTaskRunner>();
   }
 
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
+
 private:
   // Returns the index associated with current context, if any.
   SymbolIndex *getIndex() const;
@@ -142,6 +144,13 @@ SymbolIndex *ProjectAwareIndex::getIndex() const {
   if (Entry.second)
     Entry.first->getSecond() = Gen(External, Tasks.get());
   return Entry.first->second.get();
+}
+
+size_t ProjectAwareIndex::collectAllSymbols(SymbolSimplifiedMap &Map) const
+{
+  if (auto *Idx = getIndex())
+    return Idx->collectAllSymbols(Map);
+  return 0;
 }
 } // namespace
 

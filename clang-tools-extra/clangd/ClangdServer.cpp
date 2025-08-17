@@ -44,6 +44,7 @@
 #include "clang/Tooling/Core/Replacement.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/Path.h"
@@ -227,6 +228,10 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
       PreambleParseForwardingFunctions(Opts.PreambleParseForwardingFunctions),
       ImportInsertions(Opts.ImportInsertions),
       PublishInactiveRegions(Opts.PublishInactiveRegions),
+      WorkspaceSymbolsFuzzySW(Opts.WorkspaceSymbolsFuzzySW),
+      WorkspaceSymbolsVSCodeNameThenScope(Opts.WorkspaceSymbolsVSCodeNameThenScope),
+      WorkspaceSymbolsFirstSpaceSplitScopeName(Opts.WorkspaceSymbolsFirstSpaceSplitScopeName),
+      WorkspaceSymbolsExtendedQueries(Opts.WorkspaceSymbolsExtendedQueries),
       WorkspaceRoot(Opts.WorkspaceRoot),
       Transient(Opts.ImplicitCancellation ? TUScheduler::InvalidateOnUpdate
                                           : TUScheduler::NoInvalidation),
@@ -268,6 +273,17 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
       return false;
     });
   });
+
+  //configure SIMD fuzzy matchers
+  for(auto &FM : m_FuzzyMatchers)
+  {
+    if (Opts.AsyncThreadsCount != 0)
+      FM.SetupThreads(Opts.AsyncThreadsCount);
+    else
+      FM.SetupThreads(2);
+
+    m_AvailableFuzzyMatchers.push(&FM);
+  }
 
   if (Opts.AsyncThreadsCount != 0)
     IndexTasks.emplace();
@@ -1013,8 +1029,42 @@ void ClangdServer::workspaceSymbols(
   WorkScheduler->run(
       "getWorkspaceSymbols", /*Path=*/"",
       [Query = Query.str(), Limit, CB = std::move(CB), this]() mutable {
-        CB(clangd::getWorkspaceSymbols(Query, Limit, Index,
-                                       WorkspaceRoot.value_or("")));
+        if (!WorkspaceSymbolsFuzzySW)
+          CB(clangd::getWorkspaceSymbols(Query, Limit, Index,
+                                         WorkspaceRoot.value_or("")));
+        else
+        {
+          fuzzy_sw::SIMDParMatcher *pFM = nullptr;
+          {
+            std::lock_guard<std::mutex> g{m_AvailableFuzzyMatchersLock};
+            if (!m_AvailableFuzzyMatchers.empty())
+            {
+              pFM = m_AvailableFuzzyMatchers.top();
+              m_AvailableFuzzyMatchers.pop();
+            }
+          }
+          auto on_exit = llvm::make_scope_exit([&]{
+              if (pFM)
+              {
+                std::lock_guard<std::mutex> g{m_AvailableFuzzyMatchersLock};
+                m_AvailableFuzzyMatchers.push(pFM);
+              }
+          });
+
+          if (pFM)
+          {
+            WorkspaceSymbolOptions Opts;
+            Opts.VSCode_NameThenScope = WorkspaceSymbolsVSCodeNameThenScope;
+            Opts.FirstSpaceSplitScopeName = WorkspaceSymbolsFirstSpaceSplitScopeName;
+            Opts.ExtendedQueries = WorkspaceSymbolsExtendedQueries;
+            CB(clangd::getWorkspaceSymbolsV2(Query, Limit, Index,
+                                           WorkspaceRoot.value_or(""), *pFM, Opts));
+          }else
+          {
+            std::vector<SymbolInformation> dummy;
+            CB(dummy);
+          }
+        }
       });
 }
 

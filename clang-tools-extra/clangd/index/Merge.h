@@ -49,6 +49,8 @@ public:
   size_t estimateMemoryUsage() const override {
     return Dynamic->estimateMemoryUsage() + Static->estimateMemoryUsage();
   }
+
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
 };
 
 } // namespace clangd

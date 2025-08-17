@@ -137,5 +137,14 @@ size_t MemIndex::estimateMemoryUsage() const {
          Relations.getMemorySize() + BackingDataSize;
 }
 
+size_t MemIndex::collectAllSymbols(SymbolSimplifiedMap &Map) const
+{
+  for (const auto &Pair : Index) {
+    const Symbol &S = *Pair.second;
+    Map[S.ID] = S;
+  }
+  return Index.size();
+}
+
 } // namespace clangd
 } // namespace clang

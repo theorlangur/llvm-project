@@ -85,6 +85,7 @@ public:
 
   size_t estimateMemoryUsage() const override;
 
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
 private:
   // Index is a set of symbols that are deduplicated by symbol IDs.
   llvm::DenseMap<SymbolID, const Symbol *> Index;

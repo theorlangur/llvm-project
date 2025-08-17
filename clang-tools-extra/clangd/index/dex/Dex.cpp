@@ -399,6 +399,15 @@ size_t Dex::estimateMemoryUsage() const {
   return Bytes + BackingDataSize;
 }
 
+size_t Dex::collectAllSymbols(SymbolSimplifiedMap &Map) const
+{
+  for(auto const *S : Symbols)
+  {
+    Map[S->ID] = *S;
+  }
+  return Symbols.size();
+}
+
 // Given foo://bar/one/two
 // Returns        ~~~~~~~~  (or empty for bad URI)
 llvm::StringRef findPathInURI(llvm::StringRef S) {

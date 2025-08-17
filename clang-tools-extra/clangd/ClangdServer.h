@@ -22,6 +22,7 @@
 #include "SemanticHighlighting.h"
 #include "TUScheduler.h"
 #include "XRefs.h"
+#include "fuzzy_sw/fuzzy_sw.hpp"
 #include "index/Background.h"
 #include "index/FileIndex.h"
 #include "index/Index.h"
@@ -199,6 +200,11 @@ public:
     bool PCHAlwaysWait = true;
 
     bool PCHDbgLog = false;
+
+    bool WorkspaceSymbolsFuzzySW = false;
+    bool WorkspaceSymbolsVSCodeNameThenScope = false;
+    bool WorkspaceSymbolsFirstSpaceSplitScopeName = false;
+    bool WorkspaceSymbolsExtendedQueries = true;
 
     explicit operator TUScheduler::Options() const;
   };
@@ -516,6 +522,10 @@ private:
 
   bool PublishInactiveRegions = false;
 
+  bool WorkspaceSymbolsFuzzySW = false;
+  bool WorkspaceSymbolsVSCodeNameThenScope = false;
+  bool WorkspaceSymbolsFirstSpaceSplitScopeName = false;
+  bool WorkspaceSymbolsExtendedQueries = false;
   // GUARDED_BY(CachedCompletionFuzzyFindRequestMutex)
   llvm::StringMap<std::optional<FuzzyFindRequest>>
       CachedCompletionFuzzyFindRequestByFile;
@@ -532,6 +542,10 @@ private:
   DraftStore DraftMgr;
 
   std::unique_ptr<ThreadsafeFS> DirtyFS;
+
+  fuzzy_sw::SIMDParMatcher m_FuzzyMatchers[8];
+  std::mutex m_AvailableFuzzyMatchersLock;
+  std::stack<fuzzy_sw::SIMDParMatcher*> m_AvailableFuzzyMatchers;
 };
 
 } // namespace clangd

@@ -419,6 +419,37 @@ opt<bool> PCHDbgLog{
     init(false),
 };
 
+opt<bool> WorkspaceSymbolFuzzySW{
+    "workspace-symbol-fuzzy-sw",
+    cat(Features),
+    desc("Use Smith-Waterman fuzzy search algorithm for workspace symbol matching"),
+    init(false),
+};
+
+opt<bool> WorkspaceSymbolVSCodeNameThenScope{
+    "workspace-symbol-vscode-name-only",
+    cat(Features),
+    desc("Match request against name only (:: in query forces consider scope as well)"),
+    init(false),
+};
+
+opt<bool> WorkspaceSymbolFirstSpaceSplitScopeName{
+    "workspace-symbol-first-space-split-scope-name",
+    cat(Features),
+    desc("First space splits the query in 2. 1st matches scope, 2nd matches name"),
+    init(true),
+};
+
+opt<bool> WorkspaceSymbolExtendedQueries{
+    "workspace-symbol-extended-queries",
+    cat(Features),
+    desc("Enables special treating of '!' and '?' as first characters (requires --workspace-symbol-fuzzy-sw)"
+         "'!' - forwards request to the original workspace symbol lookup routine"
+         "'?' - symbol lookup includes also symbols outside the workspace root path"
+            ),
+    init(true),
+};
+
 opt<bool> Sync{
     "sync",
     cat(Misc),
@@ -769,7 +800,7 @@ enum class ErrorResultCode : int {
   CheckFailed = 3
 };
 
-static const char *PCHVers = "PCH ver. 1.03";
+static const char *PCHVers = "PCH ver. 1.04";
 int clangdMain(int argc, char *argv[]) {
   // Clang could run on the main thread. e.g., when the flag '-check' or '-sync'
   // is enabled.
@@ -933,6 +964,10 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
   }
   Opts.PCHAlwaysWait = PCHAlwaysWait;
   Opts.PCHDbgLog = PCHDbgLog;
+  Opts.WorkspaceSymbolsFuzzySW = WorkspaceSymbolFuzzySW;
+  Opts.WorkspaceSymbolsVSCodeNameThenScope = WorkspaceSymbolVSCodeNameThenScope;
+  Opts.WorkspaceSymbolsFirstSpaceSplitScopeName = WorkspaceSymbolFirstSpaceSplitScopeName;
+  Opts.WorkspaceSymbolsExtendedQueries = WorkspaceSymbolExtendedQueries;
 
   if (!ResourceDir.empty())
     Opts.ResourceDir = ResourceDir;

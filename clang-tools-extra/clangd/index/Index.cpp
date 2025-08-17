@@ -92,5 +92,10 @@ size_t SwapIndex::estimateMemoryUsage() const {
   return snapshot()->estimateMemoryUsage();
 }
 
+size_t SwapIndex::collectAllSymbols(SymbolSimplifiedMap &Map) const
+{
+  return snapshot()->collectAllSymbols(Map);
+}
+
 } // namespace clangd
 } // namespace clang

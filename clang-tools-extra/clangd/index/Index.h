@@ -189,6 +189,9 @@ public:
 
   /// Returns estimated size of index (in bytes).
   virtual size_t estimateMemoryUsage() const = 0;
+
+  virtual size_t
+    collectAllSymbols(SymbolSimplifiedMap &Map) const = 0;
 };
 
 // Delegating implementation of SymbolIndex whose delegate can be swapped out.
@@ -219,6 +222,7 @@ public:
 
   size_t estimateMemoryUsage() const override;
 
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
 private:
   std::shared_ptr<SymbolIndex> snapshot() const;
   mutable std::mutex Mutex;

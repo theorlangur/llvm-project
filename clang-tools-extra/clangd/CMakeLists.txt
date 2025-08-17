@@ -149,6 +149,8 @@ add_clang_library(clangDaemon STATIC
   refactor/Rename.cpp
   refactor/Tweak.cpp
 
+  fuzzy_sw/fuzzy_sw_par.cpp
+
   DEPENDS
   omp_gen
   ClangDriverOptions

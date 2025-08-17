@@ -259,6 +259,36 @@ private:
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const SymbolSlab &Slab);
 
+//for fuzzy find purposes
+struct SymbolSimplified {//see Symbol for field descriptions
+  SymbolID ID;
+  index::SymbolInfo SymInfo = index::SymbolInfo();
+  llvm::StringRef Name;
+  llvm::StringRef Scope;
+  SymbolLocation Definition;
+  SymbolLocation CanonicalDeclaration;
+  llvm::StringRef TemplateSpecializationArgs;
+
+  SymbolSimplified() = default;
+  SymbolSimplified(Symbol const& S):
+    ID(S.ID), SymInfo(S.SymInfo), Name(S.Name), Scope(S.Scope)
+    , Definition(S.Definition), CanonicalDeclaration(S.CanonicalDeclaration)
+    , TemplateSpecializationArgs(S.TemplateSpecializationArgs)
+    {}
+  SymbolSimplified& operator=(Symbol const& S)
+  {
+    ID = S.ID;
+    SymInfo = S.SymInfo;
+    if (Name.empty()) Name = S.Name;
+    if (Scope.empty()) Scope = S.Scope;
+    if (!Definition) Definition = S.Definition;
+    if (!CanonicalDeclaration) CanonicalDeclaration = S.CanonicalDeclaration;
+    if (TemplateSpecializationArgs.empty()) TemplateSpecializationArgs = S.TemplateSpecializationArgs;
+    return *this;
+  }
+};
+using SymbolSimplifiedMap = llvm::DenseMap<SymbolID, SymbolSimplified>;
+
 } // namespace clangd
 } // namespace clang
 

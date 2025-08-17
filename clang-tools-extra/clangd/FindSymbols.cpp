@@ -38,25 +38,6 @@ struct ScoredSymbolGreater {
     return L.second.name < R.second.name; // Earlier name is better.
   }
 };
-
-// Returns true if \p Query can be found as a sub-sequence inside \p Scope.
-bool approximateScopeMatch(llvm::StringRef Scope, llvm::StringRef Query, bool caseInsensitive) {
-  assert(Scope.empty() || Scope.ends_with("::"));
-  assert(Query.empty() || Query.ends_with("::"));
-  while (!Scope.empty() && !Query.empty()) {
-    auto Colons = Scope.find("::");
-    assert(Colons != llvm::StringRef::npos);
-
-    llvm::StringRef LeadingSpecifier = Scope.slice(0, Colons + 2);
-    Scope = Scope.slice(Colons + 2, llvm::StringRef::npos);
-    if (caseInsensitive)
-		Query.consume_front_insensitive(LeadingSpecifier);
-    else
-		Query.consume_front(LeadingSpecifier);
-  }
-  return Query.empty();
-}
-
 } // namespace
 
 llvm::Expected<Location> indexToLSPLocation(const SymbolLocation &Loc,
@@ -177,6 +158,273 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
   });
   for (auto &R : std::move(Top).items())
     Result.push_back(std::move(R.second));
+  return Result;
+}
+
+namespace
+{
+  struct SimpleSymbolCharSrc: fuzzy_sw::CharSource
+  {
+    const SymbolSimplified *Sym;
+    Location Loc;
+    SimpleSymbolCharSrc(): Sym(nullptr){}
+    SimpleSymbolCharSrc(const SymbolSimplified *S, Location const& L): Sym(S), Loc(L){}
+
+    size_t length() const override
+    {
+      return Sym->Scope.size() + Sym->Name.size();
+    }
+
+    size_t read(char *PDest, size_t Off, size_t N) const override
+    {
+      size_t ScopeSize = Sym->Scope.size();
+      size_t NameSize = Sym->Name.size();
+
+      if (Off >= (ScopeSize + NameSize))
+        return 0;
+
+      size_t Res = 0;
+      size_t T = N;
+      if (Off < ScopeSize)
+      {
+        if ((Off + T) > ScopeSize)
+          T = ScopeSize - Off;
+
+        std::memcpy(PDest, Sym->Scope.data() + Off, T);
+        N -= T;
+        if (!N) return T;
+        Off += T;
+        PDest += T;
+        Res += T;
+      }
+
+      Off -= ScopeSize;
+      T = N;
+      if ((Off + T) > NameSize)
+        T = NameSize - Off;
+      std::memcpy(PDest, Sym->Name.data() + Off, T);
+      return Res + T;
+    }
+  };
+
+  struct SimpleSymbolOnlyNameCharSrc final: SimpleSymbolCharSrc
+  {
+    using SimpleSymbolCharSrc::SimpleSymbolCharSrc;
+
+    size_t length() const override
+    {
+      return Sym->Name.size();
+    }
+
+    size_t read(char *PDest, size_t Off, size_t N) const override
+    {
+      size_t NameSize = Sym->Name.size();
+
+      if (Off >= NameSize)
+        return 0;
+
+      size_t T = N;
+      if ((Off + T) > NameSize)
+        T = NameSize - Off;
+      std::memcpy(PDest, Sym->Name.data() + Off, T);
+      return T;
+    }
+  };
+
+  struct SimpleSymbolOnlyScopeCharSrc final: SimpleSymbolCharSrc
+  {
+    using SimpleSymbolCharSrc::SimpleSymbolCharSrc;
+
+    size_t length() const override
+    {
+      return Sym->Scope.size();
+    }
+
+    size_t read(char *PDest, size_t Off, size_t N) const override
+    {
+      size_t ScopeSize = Sym->Scope.size();
+
+      if (Off >= ScopeSize)
+        return 0;
+
+      size_t T = N;
+      if ((Off + T) > ScopeSize)
+        T = ScopeSize - Off;
+      std::memcpy(PDest, Sym->Scope.data() + Off, T);
+      return T;
+    }
+  };
+}
+
+llvm::Expected<Location> symbolToLocationV2(const SymbolSimplified &Sym,
+                                          llvm::StringRef TUPath) {
+  // Prefer the definition over e.g. a function declaration in a header
+  return indexToLSPLocation(
+      Sym.Definition ? Sym.Definition : Sym.CanonicalDeclaration, TUPath);
+}
+
+llvm::Expected<std::vector<SymbolInformation>>
+getWorkspaceSymbolsV2(llvm::StringRef Query, int Limit,
+                    const SymbolIndex *const Index, llvm::StringRef HintPath, fuzzy_sw::SIMDParMatcher &SW, WorkspaceSymbolOptions Opts)
+{
+  std::vector<SymbolInformation> Result;
+  if (!Index || Query.empty())
+    return Result;
+
+  if (Opts.ExtendedQueries && Query.starts_with('!'))//forward to getWorkspaceSymbols
+    return getWorkspaceSymbols(Query.drop_front(), Limit, Index, HintPath);
+
+  bool IncludeSymbolsOutsideWorkspace = false;
+  if (Opts.ExtendedQueries && Query.starts_with('?'))
+  {
+    Query = Query.drop_front();
+    IncludeSymbolsOutsideWorkspace = true;
+  }
+
+  enum class Mode
+  {
+    ScopeWithName,
+    NameOnly,
+    ScopeThenName
+  };
+  Mode M = Mode::ScopeWithName;
+  StringRef ScopeQuery, NameQuery;
+
+  if (Opts.VSCode_NameThenScope)
+  {
+      if (auto Pos = Query.find("::"); Pos == StringRef::npos)
+      {
+        M = Mode::NameOnly;
+        NameQuery = Query;
+      }
+  }else if (Opts.FirstSpaceSplitScopeName)
+  {
+    if (auto Pos = Query.find(' '); Pos != StringRef::npos)
+    {
+      if (!Pos) 
+      {
+        M = Mode::NameOnly;
+        NameQuery = Query.drop_front();
+      }
+      else 
+      {
+        M = Mode::ScopeThenName;
+        ScopeQuery = Query.take_front(Pos);
+        NameQuery = Query.take_back(Query.size() - Pos - 1);
+      }
+    }
+  }
+
+  SymbolSimplifiedMap AllSymbols;
+  Index->collectAllSymbols(AllSymbols);
+
+  std::vector<SimpleSymbolCharSrc> SymbolsCharSrc;
+  std::vector<SimpleSymbolOnlyNameCharSrc> SymbolsOnlyNameCharSrc;
+  std::vector<SimpleSymbolOnlyScopeCharSrc> SymbolsOnlyScopeCharSrc;
+  std::vector<fuzzy_sw::CharSource*> TargetCharSrc;
+  std::vector<fuzzy_sw::CharSource*> TargetOnlyNameCharSrc;
+  std::vector<fuzzy_sw::CharSource*> TargetOnlyScopeCharSrc;
+  if (M == Mode::ScopeWithName)
+  {
+    SymbolsCharSrc.reserve(AllSymbols.size());
+    TargetCharSrc.reserve(AllSymbols.size());
+  }
+  else
+  {
+    if (M == Mode::ScopeThenName)
+    {
+      SymbolsOnlyScopeCharSrc.reserve(AllSymbols.size());
+      TargetOnlyScopeCharSrc.reserve(AllSymbols.size());
+    }
+    SymbolsOnlyNameCharSrc.reserve(AllSymbols.size());
+    TargetOnlyNameCharSrc.reserve(AllSymbols.size());
+  }
+  for(auto const& S : AllSymbols)
+  {
+    auto Loc = symbolToLocationV2(S.second, HintPath);
+    if (!Loc) {
+      log("Workspace symbols: {0}", Loc.takeError());
+      continue;
+    }
+    if (!IncludeSymbolsOutsideWorkspace && !Loc->uri.file().starts_with(HintPath))
+      continue;
+
+    if (M == Mode::ScopeWithName)
+    {
+      auto &Cs = SymbolsCharSrc.emplace_back(&S.second, *Loc);
+      TargetCharSrc.push_back(&Cs);
+    }else
+    {
+      if (M == Mode::ScopeThenName)
+      {
+        auto &Cs = SymbolsOnlyScopeCharSrc.emplace_back(&S.second, *Loc);
+        TargetOnlyScopeCharSrc.push_back(&Cs);
+      }
+      auto &Cs = SymbolsOnlyNameCharSrc.emplace_back(&S.second, *Loc);
+      TargetOnlyNameCharSrc.push_back(&Cs);
+    }
+  }
+
+  fuzzy_sw::SIMDParMatcher::CharSourceResult MatchResults;
+  if (M == Mode::ScopeWithName)
+  {
+    int MaxPossibleScore = Query.size() * 3;
+    MatchResults = SW.match_par(Query, std::move(TargetCharSrc), {MaxPossibleScore / 2/*score threshold*/, true/*sort results*/});
+  }else
+  {
+    int MaxPossibleScoreName = NameQuery.size() * 3;
+    auto TMatchResults = SW.match_par(NameQuery, std::move(TargetOnlyNameCharSrc), {MaxPossibleScoreName / 3/*score threshold*/, false/*sort results*/});
+    struct Item
+    {
+      fuzzy_sw::CharSource *PSrc;
+      int Score = 0;
+    };
+    llvm::DenseMap<const SymbolSimplified*, Item> MergedSymbolScores;
+    for(auto const& [pSrc, score] : TMatchResults)
+      MergedSymbolScores[static_cast<SimpleSymbolCharSrc*>(pSrc)->Sym] = { pSrc, score };
+
+    if (M == Mode::ScopeThenName)
+    {
+      int MaxPossibleScoreScope = ScopeQuery.size() * 3;
+      TMatchResults = SW.match_par(ScopeQuery, std::move(TargetOnlyScopeCharSrc), {MaxPossibleScoreScope / 3/*score threshold*/, false/*sort results*/});
+      for(auto const& [pSrc, score] : TMatchResults)
+      {
+        const auto *Id = static_cast<SimpleSymbolCharSrc*>(pSrc)->Sym;
+        if (MergedSymbolScores.contains(Id))
+          MergedSymbolScores[Id].Score += score;
+        else
+          MergedSymbolScores[Id] = { pSrc, score };
+      }
+    }
+
+    MatchResults.reserve(MergedSymbolScores.size());
+    for(auto const& [key, val] : MergedSymbolScores)
+      MatchResults.emplace_back(val.PSrc, val.Score);
+    std::sort(MatchResults.begin(), MatchResults.end(), [](auto const&I1, auto const&I2){ return I1.score > I2.score; });
+  }
+
+  float MaxScore = !MatchResults.empty() ? MatchResults[0].score : 1.f;
+  for(auto &R : MatchResults)
+  {
+    SimpleSymbolCharSrc *PSrc = static_cast<SimpleSymbolCharSrc *>(R.target);
+    const SymbolSimplified *Sym = PSrc->Sym;
+
+    SymbolInformation Info;
+    Info.name = (Sym->Name + Sym->TemplateSpecializationArgs).str();
+    Info.kind = indexSymbolKindToSymbolKind(Sym->SymInfo.Kind);
+    Info.location = PSrc->Loc;
+    auto Scope = Sym->Scope;
+    Scope.consume_back("::");
+    Info.containerName = Scope.str();
+
+    // Exposed score excludes fuzzy-match component, for client-side re-ranking.
+    Info.score = float(R.score) / MaxScore;//renorming to 0..1
+    Result.push_back(std::move(Info));
+
+    if (--Limit == 0)
+      break;
+  }
+
   return Result;
 }
 

@@ -15,6 +15,7 @@
 #include "Protocol.h"
 #include "index/Symbol.h"
 #include "llvm/ADT/StringRef.h"
+#include "fuzzy_sw/fuzzy_sw.hpp"
 
 namespace clang {
 namespace clangd {
@@ -46,6 +47,16 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
 /// Retrieves the symbols contained in the "main file" section of an AST in the
 /// same order that they appear.
 llvm::Expected<std::vector<DocumentSymbol>> getDocumentSymbols(ParsedAST &AST);
+
+struct WorkspaceSymbolOptions
+{
+   bool VSCode_NameThenScope = false;
+   bool FirstSpaceSplitScopeName = false;
+   bool ExtendedQueries = true;//first symbol: '!' -> forward query to old 'getDocumentSymbols', '?' - include symbols from outside the workspace root
+};
+llvm::Expected<std::vector<SymbolInformation>>
+getWorkspaceSymbolsV2(llvm::StringRef Query, int Limit,
+                    const SymbolIndex *const Indexint, llvm::StringRef HintPath, fuzzy_sw::SIMDParMatcher &SW, WorkspaceSymbolOptions Opts);
 
 } // namespace clangd
 } // namespace clang
