@@ -339,6 +339,15 @@ getWorkspaceSymbolsV2(llvm::StringRef Query, int Limit,
     SymbolsOnlyNameCharSrc.reserve(AllSymbols.size());
     TargetOnlyNameCharSrc.reserve(AllSymbols.size());
   }
+
+#if defined(_WIN32)
+  std::string AlternativeHintPath = HintPath.str();
+  if (std::islower(AlternativeHintPath[0]))
+    AlternativeHintPath[0] = std::toupper(AlternativeHintPath[0]);
+  else
+    AlternativeHintPath[0] = std::tolower(AlternativeHintPath[0]);
+  StringRef AltHintPath = AlternativeHintPath;
+#endif
   for(auto const& S : AllSymbols)
   {
     auto Loc = symbolToLocationV2(S.second, HintPath);
@@ -346,8 +355,16 @@ getWorkspaceSymbolsV2(llvm::StringRef Query, int Limit,
       log("Workspace symbols: {0}", Loc.takeError());
       continue;
     }
+#if defined(_WIN32)
+    if (!IncludeSymbolsOutsideWorkspace
+        && !Loc->uri.file().starts_with(HintPath) &&
+        !Loc->uri.file().starts_with(AltHintPath)
+        )
+      continue;
+#else
     if (!IncludeSymbolsOutsideWorkspace && !Loc->uri.file().starts_with(HintPath))
       continue;
+#endif
 
     if (M == Mode::ScopeWithName)
     {
