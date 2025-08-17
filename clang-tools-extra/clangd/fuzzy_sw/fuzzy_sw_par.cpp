@@ -276,48 +276,55 @@ template <class T> struct Span {
         static constexpr size_t kPow2 = GetCeilPow2(sizeof...(d));
         static constexpr size_t kLog2 = GetLog2(kPow2);
         typename simd_t::int_type_t dMasks[sizeof...(d)][simd_t::Width];
+        using V = typename simd_t::simd_base_t;
 
-        constexpr Delimiters<simd_t, d...>()
+        template<size_t... I>
+        constexpr void FillD(std::index_sequence<I...> s)
         {
             auto fill_d = [](typename simd_t::int_type_t (&dest)[simd_t::Width], char c)
             {
                 for(size_t i = 0; i < simd_t::Width; ++i) dest[i] = c;
             };
-            [&]<size_t... I>(std::index_sequence<I...> s){
-                (fill_d(dMasks[I], d),...);
-            }(std::make_index_sequence<sizeof...(d)>());
+            (fill_d(dMasks[I], d),...);
+        }
+
+        constexpr Delimiters<simd_t, d...>()
+        {
+            FillD(std::make_index_sequence<sizeof...(d)>());
+        }
+
+        template<size_t... I>
+        void Eq(V *temp, V syms, std::index_sequence<I...> s) const
+        {
+            ((temp[I] = simd_t::eq(syms, simd_t::load(dMasks[I]))),...);
+        }
+
+        template<size_t... I>
+        void OrStage(V *temp, std::index_sequence<I...> s) const
+        {
+            ((temp[I] = simd_t::_or(temp[I], temp[I + sizeof...(I)])),...);
+        }
+
+        template<size_t... I>
+        void OrLog(V *temp, std::index_sequence<I...> s) const
+        {
+            ((OrStage(temp, std::make_index_sequence<(1 << (kLog2 - I - 1))>())),...);
         }
 
         typename simd_t::simd_base_t MatchDelimiters(typename simd_t::simd_base_t syms) const
         {
-            using V = typename simd_t::simd_base_t;
             V temp[kPow2] = {};
             //1. check all masks and store results locally
-            [&]<size_t... I>(std::index_sequence<I...> s){
-                ((temp[I] = simd_t::eq(syms, simd_t::load(dMasks[I]))),...);
-            }(std::make_index_sequence<sizeof...(d)>());
+            Eq(temp, syms, std::make_index_sequence<sizeof...(d)>());
 
             //2. gradually 'or' all pairs
-            auto or_stage = [&]<size_t... I>(std::index_sequence<I...> s){
-                ((temp[I] = simd_t::_or(temp[I], temp[I + sizeof...(I)])),...);
-            };
-            [&]<size_t...I>(std::index_sequence<I...> s)
-            {
-                ((or_stage(std::make_index_sequence<(1 << (kLog2 - I - 1))>())),...);
-            }(std::make_index_sequence<kLog2>());
-
+            OrLog(temp, std::make_index_sequence<kLog2>());
             return temp[0];
         }
 
         void Generate()
         {
-            auto fill_d = [](typename simd_t::int_type_t (&dest)[simd_t::Width], char c)
-            {
-                for(size_t i = 0; i < simd_t::Width; ++i) dest[i] = c;
-            };
-            [&]<size_t... I>(std::index_sequence<I...> s){
-                (fill_d(dMasks[I], d),...);
-            }(std::make_index_sequence<sizeof...(d)>());
+            FillD(std::make_index_sequence<sizeof...(d)>());
         }
     };
 
