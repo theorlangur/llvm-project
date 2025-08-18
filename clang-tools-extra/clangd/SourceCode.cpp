@@ -547,10 +547,23 @@ std::optional<std::string> getCanonicalPath(const FileEntryRef F,
     llvm::StringRef DirName = FileMgr.getCanonicalName(*Dir);
     llvm::sys::path::append(RealPath, DirName,
                             llvm::sys::path::filename(FilePath));
+#if defined(_WIN32)
+    std::string r = RealPath.str().str();
+    if (r.size() > 2 && r[1] == ':')
+      r[0] = std::toupper(r[0]);
+    return r;
+#else
     return RealPath.str().str();
+#endif
   }
-
+#if defined(_WIN32)
+  std::string r = FilePath.str().str();
+  if (r.size() > 2 && r[1] == ':')
+    r[0] = std::toupper(r[0]);
+  return r;
+#else
   return FilePath.str().str();
+#endif
 }
 
 TextEdit toTextEdit(const FixItHint &FixIt, const SourceManager &M,
