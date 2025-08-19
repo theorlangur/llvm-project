@@ -624,6 +624,9 @@ bool SymbolCollector::handleDeclOccurrence(
   if (!ND)
     return true;
 
+  if ((Opts.Origin == SymbolOrigin::Preamble) && D->isFromASTFile())
+    return true;
+
   auto ID = getSymbolIDCached(ND);
   if (!ID)
     return true;
