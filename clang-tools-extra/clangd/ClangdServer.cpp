@@ -277,7 +277,9 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
   //configure SIMD fuzzy matchers
   for(auto &FM : m_FuzzyMatchers)
   {
-    if (Opts.AsyncThreadsCount != 0)
+    if (Opts.WorkspaceSymbolsFuzzySWThreads != 0)
+      FM.SetupThreads(Opts.WorkspaceSymbolsFuzzySWThreads);
+    else if (Opts.AsyncThreadsCount != 0)
       FM.SetupThreads(Opts.AsyncThreadsCount);
     else
       FM.SetupThreads(2);

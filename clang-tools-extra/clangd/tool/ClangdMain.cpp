@@ -426,6 +426,13 @@ opt<bool> WorkspaceSymbolFuzzySW{
     init(false),
 };
 
+opt<int> WorkspaceSymbolFuzzySWThreads{
+    "workspace-symbol-fuzzy-sw-threads",
+    cat(Features),
+    desc("Amount of threads to use for parallel fuzzy matching with SW algorithm (default: same as -j parameter)"),
+    init(0),
+};
+
 opt<bool> WorkspaceSymbolVSCodeNameThenScope{
     "workspace-symbol-vscode-name-only",
     cat(Features),
@@ -800,7 +807,7 @@ enum class ErrorResultCode : int {
   CheckFailed = 3
 };
 
-static const char *PCHVers = "PCH ver. 1.04";
+static const char *PCHVers = "PCH ver. 1.05";
 int clangdMain(int argc, char *argv[]) {
   // Clang could run on the main thread. e.g., when the flag '-check' or '-sync'
   // is enabled.
@@ -965,6 +972,7 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
   Opts.PCHAlwaysWait = PCHAlwaysWait;
   Opts.PCHDbgLog = PCHDbgLog;
   Opts.WorkspaceSymbolsFuzzySW = WorkspaceSymbolFuzzySW;
+  Opts.WorkspaceSymbolsFuzzySWThreads = WorkspaceSymbolFuzzySWThreads;
   Opts.WorkspaceSymbolsVSCodeNameThenScope = WorkspaceSymbolVSCodeNameThenScope;
   Opts.WorkspaceSymbolsFirstSpaceSplitScopeName = WorkspaceSymbolFirstSpaceSplitScopeName;
   Opts.WorkspaceSymbolsExtendedQueries = WorkspaceSymbolExtendedQueries;

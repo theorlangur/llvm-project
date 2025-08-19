@@ -205,6 +205,7 @@ public:
     bool WorkspaceSymbolsVSCodeNameThenScope = false;
     bool WorkspaceSymbolsFirstSpaceSplitScopeName = false;
     bool WorkspaceSymbolsExtendedQueries = true;
+    int  WorkspaceSymbolsFuzzySWThreads = 0;
 
     explicit operator TUScheduler::Options() const;
   };
