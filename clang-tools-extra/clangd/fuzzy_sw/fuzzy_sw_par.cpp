@@ -498,6 +498,7 @@ template <class T> struct Span {
             vec F = zero;
             char qc = query[i - 1];
 
+            bool apply_delimiter_bonus = i == 1;
             vec prev_is_delim = zero;
             vec valid_targets_mask = simd_t::set1(simd_t::kMaskVal);
             size_t valid_targets_bitmask = size_t(-1);
@@ -512,8 +513,8 @@ template <class T> struct Span {
                 vec match_score;
                 impl.m_LUTCache.Gather(qc, target_chars_orig, match_score);
                 vec mismatches = simd_t::eq(match_score, simd_t::set1(-1));
-                vec delim_bonus_mask = simd_t::blend(simd_t::_xor(is_delim, prev_is_delim), simd_t::set1(0), mismatches);
-                vec delim_bonus_val = simd_t::blend(simd_t::set1(0), impl.delim_bonus, delim_bonus_mask);
+                vec delim_bonus_mask = apply_delimiter_bonus ? simd_t::blend(simd_t::_and(simd_t::_xor(is_delim, prev_is_delim), prev_is_delim), simd_t::set1(0), mismatches) : simd_t::set1(0);
+                vec delim_bonus_val = apply_delimiter_bonus ? simd_t::blend(simd_t::set1(0), impl.delim_bonus, delim_bonus_mask) : delim_bonus_mask;
                 match_score = simd_t::add(delim_bonus_val, match_score);
 
                 auto diag = simd_t::add(H_prev[j - 1], match_score);

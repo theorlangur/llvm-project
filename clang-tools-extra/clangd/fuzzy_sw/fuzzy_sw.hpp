@@ -12,7 +12,7 @@ namespace fuzzy_sw
         int open_gap_penalty = -2;
         int mismatch_penalty = -1;
 
-        int delimiter_boundary_bonus = 1;
+        int delimiter_boundary_bonus = 2;
         int full_match_bonus = 3;
         int icase_match_bonus = 2;
     };
