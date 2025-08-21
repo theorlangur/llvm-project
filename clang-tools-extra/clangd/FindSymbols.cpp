@@ -417,7 +417,12 @@ getWorkspaceSymbolsV2(llvm::StringRef Query, int Limit,
     MatchResults.reserve(MergedSymbolScores.size());
     for(auto const& [key, val] : MergedSymbolScores)
       MatchResults.emplace_back(val.PSrc, val.Score);
-    std::sort(MatchResults.begin(), MatchResults.end(), [](auto const&I1, auto const&I2){ return I1.score > I2.score; });
+    std::sort(MatchResults.begin(), MatchResults.end(), [](auto const&I1, auto const&I2)
+        { 
+          if (I1.score != I2.score)
+            return I1.score > I2.score; 
+          return I1.target->length() < I2.target->length();
+        });
   }
 
   float MaxScore = !MatchResults.empty() ? MatchResults[0].score : 1.f;
