@@ -1414,7 +1414,18 @@ ReferencesResult findReferences(ParsedAST &AST, Position Pos, uint32_t Limit,
                                 const SymbolIndex *Index, bool AddContext) {
   ReferencesResult Results;
   const SourceManager &SM = AST.getSourceManager();
+#if defined(_WIN32)
   auto MainFilePath = AST.tuPath();
+  std::string MainFilePathUpper;
+  if (MainFilePath.size() > 2 && MainFilePath[1] == ':' && std::islower(MainFilePath[0]))
+  {
+    MainFilePathUpper = std::string(MainFilePath.data(), MainFilePath.size());
+    MainFilePathUpper[0] = std::toupper(MainFilePathUpper[0]);
+    MainFilePath = MainFilePathUpper;
+  }
+#else
+  auto MainFilePath = AST.tuPath();
+#endif
   auto URIMainFile = URIForFile::canonicalize(MainFilePath, MainFilePath);
   auto CurLoc = sourceLocationInMainFile(SM, Pos);
   if (!CurLoc) {
