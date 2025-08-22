@@ -550,7 +550,7 @@ std::optional<std::string> getCanonicalPath(const FileEntryRef F,
 #if defined(_WIN32)
     std::string r = RealPath.str().str();
     if (r.size() > 2 && r[1] == ':')
-      r[0] = std::toupper(r[0]);
+      r[0] = std::tolower(r[0]);
     return r;
 #else
     return RealPath.str().str();
@@ -559,7 +559,7 @@ std::optional<std::string> getCanonicalPath(const FileEntryRef F,
 #if defined(_WIN32)
   std::string r = FilePath.str().str();
   if (r.size() > 2 && r[1] == ':')
-    r[0] = std::toupper(r[0]);
+    r[0] = std::tolower(r[0]);
   return r;
 #else
   return FilePath.str().str();

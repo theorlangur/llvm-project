@@ -1417,10 +1417,10 @@ ReferencesResult findReferences(ParsedAST &AST, Position Pos, uint32_t Limit,
 #if defined(_WIN32)
   auto MainFilePath = AST.tuPath();
   std::string MainFilePathUpper;
-  if (MainFilePath.size() > 2 && MainFilePath[1] == ':' && std::islower(MainFilePath[0]))
+  if (MainFilePath.size() > 2 && MainFilePath[1] == ':' && std::isupper(MainFilePath[0]))
   {
     MainFilePathUpper = std::string(MainFilePath.data(), MainFilePath.size());
-    MainFilePathUpper[0] = std::toupper(MainFilePathUpper[0]);
+    MainFilePathUpper[0] = std::tolower(MainFilePathUpper[0]);
     MainFilePath = MainFilePathUpper;
   }
 #else
@@ -1641,6 +1641,18 @@ ReferencesResult findReferences(ParsedAST &AST, Position Pos, uint32_t Limit,
   // these.
   QueryIndex(std::move(OverriddenMethods), /*AllowAttributes=*/false,
              /*AllowMainFileSymbols=*/true);
+#if defined(_WIN32)
+  for (auto& R : Results.References)
+  {
+    auto AbsPath = R.Loc.uri.file();
+    if (AbsPath.size() > 2 && AbsPath[1] == ':' && std::islower(AbsPath[0]))
+    {
+      std::string upper(AbsPath.data(), AbsPath.size());
+      upper[0] = std::toupper(upper[0]);
+      R.Loc.uri = URIForFile::canonicalize(upper, MainFilePath);
+    }
+  }
+#endif
   return Results;
 }
 

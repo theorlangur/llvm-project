@@ -40,10 +40,10 @@ std::optional<std::string> toURI(OptionalFileEntryRef File) {
 #if defined(_WIN32)
   std::string TempAbsolutePath;
   if (AbsolutePath.size() > 2 && AbsolutePath[1] == ':' &&
-      std::islower(AbsolutePath[0]))
+      std::isupper(AbsolutePath[0]))
   {
     TempAbsolutePath = std::string(AbsolutePath.data(), AbsolutePath.size());
-    TempAbsolutePath[0] = std::toupper(TempAbsolutePath[0]);
+    TempAbsolutePath[0] = std::tolower(TempAbsolutePath[0]);
     return URI::create(TempAbsolutePath).toString();
   }
   return URI::create(AbsolutePath).toString();
