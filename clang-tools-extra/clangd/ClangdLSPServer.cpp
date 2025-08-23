@@ -112,6 +112,7 @@ CodeAction toCodeAction(const ClangdServer::TweakRef &T, const URIForFile &File,
   Args.file = File;
   Args.tweakID = T.ID;
   Args.selection = Selection;
+  Args.param = T.Param;
   CA.command->argument = std::move(Args);
   return CA;
 }
@@ -839,7 +840,7 @@ void ClangdLSPServer::onCommandApplyTweak(const TweakArgs &Args,
     // ApplyEdit will take care of calling Reply().
     return applyEdit(std::move(WE), "Tweak applied.", std::move(Reply));
   };
-  Server->applyTweak(Args.file.file(), Args.selection, Args.tweakID,
+  Server->applyTweak(Args.file.file(), Args.selection, Args.tweakID, Args.param,
                      std::move(Action));
 }
 

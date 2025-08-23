@@ -1049,6 +1049,8 @@ struct TweakArgs {
   Range selection;
   /// ID of the tweak that should be executed. Corresponds to Tweak::id().
   std::string tweakID;
+  /// optional parameter to pass to a tweak
+  std::string param;
 };
 bool fromJSON(const llvm::json::Value &, TweakArgs &, llvm::json::Path);
 llvm::json::Value toJSON(const TweakArgs &A);

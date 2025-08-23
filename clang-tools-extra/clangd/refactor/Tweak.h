@@ -123,6 +123,20 @@ public:
   virtual llvm::StringLiteral kind() const = 0;
   /// Is this a 'hidden' tweak, which are off by default.
   virtual bool hidden() const { return false; }
+
+  struct MultiInvocation
+  {
+    std::string Title;
+    std::string Param;
+  };
+
+  /// Is this tweak may provide more than 1 action to execute
+  virtual bool supportsMultiple() const { return false; }
+
+  virtual std::vector<MultiInvocation> getMultipleInvocations(const Selection &Sel) { return {}; }
+  /// Run the second stage of the action that would produce the actual effect.
+  /// EXPECTS: prepare() was called and returned true.
+  virtual Expected<Effect> applyMultiInvocation(const Selection &Sel, std::string const& Param) { return Effect{}; };
 };
 
 // All tweaks must be registered in the .cpp file next to their definition.

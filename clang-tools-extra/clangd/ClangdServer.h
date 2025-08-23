@@ -371,6 +371,7 @@ public:
     std::string ID;    /// ID to pass for applyTweak.
     std::string Title; /// A single-line message to show in the UI.
     llvm::StringLiteral Kind;
+    std::string Param; /// A specific parameter for this invocation
   };
 
   // Ref to the clangd::Diag.
@@ -419,7 +420,7 @@ public:
                   Callback<CodeActionResult> CB);
 
   /// Apply the code tweak with a specified \p ID.
-  void applyTweak(PathRef File, Range Sel, StringRef ID,
+  void applyTweak(PathRef File, Range Sel, StringRef ID, StringRef Param,
                   Callback<Tweak::Effect> CB);
 
   /// Called when an event occurs for a watched file in the workspace.

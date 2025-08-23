@@ -988,12 +988,12 @@ bool fromJSON(const llvm::json::Value &Params, TweakArgs &A,
               llvm::json::Path P) {
   llvm::json::ObjectMapper O(Params, P);
   return O && O.map("file", A.file) && O.map("selection", A.selection) &&
-         O.map("tweakID", A.tweakID);
+         O.map("tweakID", A.tweakID) && O.map("param", A.param);
 }
 
 llvm::json::Value toJSON(const TweakArgs &A) {
   return llvm::json::Object{
-      {"tweakID", A.tweakID}, {"selection", A.selection}, {"file", A.file}};
+      {"tweakID", A.tweakID}, {"selection", A.selection}, {"file", A.file}, {"param", A.param}};
 }
 
 llvm::json::Value toJSON(const ApplyWorkspaceEditParams &Params) {

@@ -823,7 +823,16 @@ void ClangdServer::codeAction(const CodeActionInputs &Params,
     };
     for (const auto &Sel : *Selections) {
       for (auto &T : prepareTweaks(*Sel, DeduplicatingFilter, FeatureModules)) {
-        Result.TweakRefs.push_back(TweakRef{T->id(), T->title(), T->kind()});
+        if (T->supportsMultiple())
+        {
+          auto MultiInvocations = T->getMultipleInvocations(*Sel);
+          if (MultiInvocations.empty())
+            continue;
+          for(auto &[Title, Param] : MultiInvocations)
+            Result.TweakRefs.push_back(TweakRef{T->id(), std::move(Title), T->kind(), std::move(Param)});
+        }
+        else
+          Result.TweakRefs.push_back(TweakRef{T->id(), T->title(), T->kind(), std::string()});
         PreparedTweaks.insert(T->id());
         TweakAvailable.record(1, T->id());
       }
@@ -835,7 +844,7 @@ void ClangdServer::codeAction(const CodeActionInputs &Params,
                             Transient);
 }
 
-void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID,
+void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID, StringRef Param,
                               Callback<Tweak::Effect> CB) {
   // Tracks number of times a tweak has been attempted.
   static constexpr trace::Metric TweakAttempt(
@@ -844,7 +853,7 @@ void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID,
   static constexpr trace::Metric TweakFailed(
       "tweak_failed", trace::Metric::Counter, "tweak_id");
   TweakAttempt.record(1, TweakID);
-  auto Action = [File = File.str(), Sel, TweakID = TweakID.str(),
+  auto Action = [File = File.str(), Sel, TweakID = TweakID.str(), Param = Param.str(),
                  CB = std::move(CB),
                  this](Expected<InputsAndAST> InpAST) mutable {
     if (!InpAST)
@@ -859,7 +868,10 @@ void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID,
     for (const auto &Selection : *Selections) {
       auto T = prepareTweak(TweakID, *Selection, FeatureModules);
       if (T) {
-        Effect = (*T)->apply(*Selection);
+        if ((*T)->supportsMultiple())
+          Effect = (*T)->applyMultiInvocation(*Selection, Param);
+        else
+          Effect = (*T)->apply(*Selection);
         break;
       }
       Effect = T.takeError();
