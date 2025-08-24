@@ -30,6 +30,7 @@
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Tooling/Core/Replacement.h"
 #include "clang/Tooling/Syntax/Tokens.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
@@ -41,7 +42,6 @@
 namespace clang {
 namespace clangd {
 namespace {
-
   static const CXXRecordDecl *selectedRecord(const Tweak::Selection &S) {
     const SourceManager &SM = S.AST->getSourceManager();
     const LangOptions &LangOpts = S.AST->getASTContext().getLangOpts();
@@ -81,7 +81,69 @@ namespace {
           return RD->getDefinition();
       }
     }
-    return nullptr;
+
+    auto &AST = *S.AST;
+    auto &Ctx = AST.getASTContext();
+    auto Offset= S.SelectionBegin;
+
+    // 3) Fallback: lexical containment using the class’s brace range.
+    const LangOptions &Lang = Ctx.getLangOpts();
+    SourceLocation Loc = SM.getComposedLoc(SM.getMainFileID(), Offset);
+    const CXXRecordDecl *Best = nullptr;
+    unsigned BestSpan = std::numeric_limits<unsigned>::max();
+
+    auto Contains = [&](SourceRange R) {
+      if (!R.isValid()) return false;
+      SourceLocation B = SM.getFileLoc(R.getBegin());
+      SourceLocation E = Lexer::getLocForEndOfToken(SM.getFileLoc(R.getEnd()), 0, SM, Lang);
+      return !SM.isBeforeInTranslationUnit(Loc, B) &&
+              SM.isBeforeInTranslationUnit(Loc, E);
+    };
+
+    struct V : RecursiveASTVisitor<V> {
+      const SourceManager *SM; 
+      const LangOptions *Lang;
+      std::function<bool(SourceRange)> Contains;
+      const CXXRecordDecl *&Best; unsigned &BestSpan;
+
+      bool TraverseFunctionDecl(FunctionDecl *D) {
+        if (auto *Body = D->getBody())
+        {
+          if (Contains(Body->getSourceRange()))
+            {
+              Best = nullptr;
+              return false;
+            }
+        }
+        return RecursiveASTVisitor::TraverseFunctionDecl(D);
+      }
+      bool TraverseCXXMethodDecl(CXXMethodDecl *D) {
+        if (auto *Body = D->getBody())
+        {
+          if (Contains(Body->getSourceRange()))
+            {
+              Best = nullptr;
+              return false;
+            }
+        }
+        return RecursiveASTVisitor::TraverseCXXMethodDecl(D);
+      }
+      bool TraverseCXXRecordDecl(CXXRecordDecl *RD) {
+        if (RD->isThisDeclarationADefinition()) {
+          SourceRange Br = RD->getBraceRange();
+          if (Contains(Br)) {
+            unsigned Span = SM->getFileOffset(
+                Lexer::getLocForEndOfToken(Br.getEnd(), 0, *SM, *Lang)) -
+                SM->getFileOffset(SM->getFileLoc(Br.getBegin()));
+            if (Span < BestSpan) { BestSpan = Span; Best = RD; }
+          }
+        }
+        return RecursiveASTVisitor::TraverseCXXRecordDecl(RD);
+      }
+    } V{{}, &SM, &Lang, Contains, Best, BestSpan};
+
+    V.TraverseDecl(Ctx.getTranslationUnitDecl());
+    return Best; // nullptr if not inside any class
   }
   // Build a set of canonical base methods already overridden by RD.
   static llvm::DenseSet<const CXXMethodDecl*> buildOverriddenSet(const CXXRecordDecl *RD) {
@@ -156,7 +218,7 @@ namespace {
     while (!Sig.empty() && isspace(Sig.back())) Sig.pop_back();
 
 
-    Sig.append(" override;");
+    Sig.append(" override;\n");
     return Sig;
   }
 
