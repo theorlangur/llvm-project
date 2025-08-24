@@ -45,41 +45,15 @@ namespace clangd {
 namespace {
   static const CXXRecordDecl *selectedRecord(const Tweak::Selection &S) {
     const SourceManager &SM = S.AST->getSourceManager();
-    const LangOptions &LangOpts = S.AST->getASTContext().getLangOpts();
 
     // Use the beginning of the selection (or cursor) and map through macros.
-    SourceLocation Cur = SM.getFileLoc(S.Cursor);
-
     for (const SelectionTree::Node *N = S.ASTSelection.commonAncestor(); N; N = N->Parent) {
       if (const Decl *D = N->ASTNode.get<Decl>())
       {
-        if (const auto *FD = dyn_cast<FunctionDecl>(D))
-        {
-          //we don't accept cursors inside function bodies
-          if (FD->doesThisDeclarationHaveABody())
-          {
-            auto *Body = FD->getBody();
-            if (Body)
-            {
-              // Compute an inclusive range for the body { ... }.
-              SourceLocation B = SM.getFileLoc(Body->getBeginLoc());
-              SourceLocation E = SM.getFileLoc(Body->getEndLoc());
-              if (B.isValid() && E.isValid())
-              {
-                // End-of-token so the closing '}' is included.
-                SourceLocation ETok =
-                  Lexer::getLocForEndOfToken(E, /*Offset=*/0, SM, LangOpts);
-
-                bool AfterBegin = !SM.isBeforeInTranslationUnit(Cur, B);
-                bool BeforeEnd  =  SM.isBeforeInTranslationUnit(Cur, ETok);
-                if (AfterBegin && BeforeEnd)
-                  return nullptr;
-              }
-            }
-          }
-        }
         if (const auto *RD = dyn_cast<CXXRecordDecl>(D))
           return RD->getDefinition();
+        return nullptr; // if we're inside anything other type of Decl but a
+                        // class/struct - not our table
       }
     }
 
