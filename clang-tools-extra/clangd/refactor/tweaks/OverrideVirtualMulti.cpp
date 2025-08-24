@@ -231,40 +231,86 @@ namespace {
       collectBaseVirtuals(Def, Out, SeenMethods);
     }
   }
+  
+  static std::string prefixBeforeNameWithMacros(const FunctionDecl* FD,
+                                              const SourceManager& SM,
+                                              const LangOptions& LO) {
+  // Spelled location of the identifier (MethodName).
+  SourceLocation Name = SM.getSpellingLoc(FD->getLocation());
+  // Start of the declaration as written (attributes/virtual/return type/macros).
+  SourceLocation Begin = SM.getSpellingLoc(FD->getBeginLoc());
 
-  // Very simple text printer for an override *declaration* with `override`.
-  static std::string printOverrideDecl(const CXXMethodDecl *BaseMD,
-      const CXXRecordDecl *Derived,
-      ASTContext &Ctx) {
-    PrintingPolicy PP(Ctx.getPrintingPolicy());
-    PP.SuppressScope = true; // no qualification inside class
-    PP.FullyQualifiedName = false;
-
-
-    std::string Sig;
-    llvm::raw_string_ostream OS(Sig);
-
-
-    // Derive the method type as seen in Derived; this is a simplification.
-    // For accuracy, use DefineOutline-like printers.
-    const FunctionProtoType *FPT = BaseMD->getType()->getAs<FunctionProtoType>();
-    (void)FPT; // placeholder
-    BaseMD->print(OS, PP);
-    if (!Sig.empty() && Sig.back() == ';') Sig.pop_back();
-    OS.flush();
-
-
-    // Ensure we drop any '= 0' and add 'override;'
-    size_t PurePos = Sig.find("= 0");
-    if (PurePos != std::string::npos)
-      Sig.erase(PurePos);
-    // Remove possible trailing spaces
-    while (!Sig.empty() && isspace(Sig.back())) Sig.pop_back();
-
-
-    Sig.append(" override;\n");
-    return Sig;
+  // Try full [Begin, Name). If that crosses macros in a way FileRange can't handle,
+  // fall back to line start → name (still preserves `SPECIAL_CODE` on that line).
+  auto CharRange = CharSourceRange::getCharRange(Begin, Name);
+  auto Range = toHalfOpenFileRange(SM, LO, CharRange.getAsRange());
+  if (!Range) {
+    FileID FID = SM.getFileID(Name);
+    unsigned Line = SM.getSpellingLineNumber(Name);
+    SourceLocation LineStart = SM.translateLineCol(FID, Line, /*Col=*/1);
+    CharRange = CharSourceRange::getCharRange(LineStart, Name);
+    Range = toHalfOpenFileRange(SM, LO, CharRange.getAsRange());
   }
+  if (!Range) return {};
+
+  // Raw spelled text: includes `SPECIAL_CODE` exactly as written (no expansion).
+  std::string Prefix = std::string(Lexer::getSourceText(CharRange, SM, LO));
+  // Optional: strip trailing spaces.
+  while (!Prefix.empty() && isspace(Prefix.back())) Prefix.pop_back();
+  return Prefix;
+}
+
+static std::string afterNamePrototype(const CXXMethodDecl* MD, const ASTContext& Ctx) {
+  // Print only the part after the name: (params) cv/ref/noexcept, etc.
+  // Keep it simple or port the suffix builder from DefineOutline for fidelity.
+  const auto* FPT = MD->getType()->getAs<FunctionProtoType>();
+
+  std::string S; llvm::raw_string_ostream OS(S);
+  OS << "(";
+  for (unsigned I = 0; I < MD->getNumParams(); ++I) {
+    if (I) OS << ", ";
+    const auto *Param = MD->getParamDecl(I);
+    Param->print(OS, Ctx.getPrintingPolicy());
+    // MD->getParamDecl(i)->getType().print(OS, Ctx.getPrintingPolicy());
+    // names & default args are optional; usually omit defaults in overrides
+  }
+  OS << ")";
+
+  // cv-qualifiers on the implicit object:
+  auto Q = FPT->getMethodQuals();
+  if (Q.hasConst())    OS << " const";
+  if (Q.hasVolatile()) OS << " volatile";
+
+  // ref-qualifier:
+  switch (FPT->getRefQualifier()) {
+    case RQ_LValue: OS << " &"; break;
+    case RQ_RValue: OS << " &&"; break;
+    default: break;
+  }
+
+  // noexcept (simplified):
+  if (FPT->hasNoexceptExceptionSpec()) OS << " noexcept";
+
+  // trailing requires? (optional – add if you need it)
+  return OS.str();
+}
+
+std::string makeOverrideDeclKeepingMacros(const CXXMethodDecl* BaseMD,
+                                          const ParsedAST& AST) {
+  const auto& SM = AST.getSourceManager();
+  const auto& LO = AST.getASTContext().getLangOpts();
+
+  std::string Prefix = prefixBeforeNameWithMacros(BaseMD, SM, LO);
+  std::string Name   = BaseMD->getNameAsString();
+  std::string Suf    = afterNamePrototype(BaseMD, AST.getASTContext());
+
+  // Don’t carry `= 0` (pure) – we’re adding `override` instead.
+  // (We didn’t copy any suffix text from source, so there’s no '= 0' to strip.)
+
+  // Result keeps SPECIAL_CODE exactly as spelled:
+  // e.g. "virtual void SPECIAL_CODE " + "MethodName" + "(...) const & noexcept override;"
+  return Prefix + " " + Name + Suf + " override;";
+}
 
   static std::optional<SourceLocation> declStartFromSelection(const Tweak::Selection &S, const CXXRecordDecl *TargetRD) {
     const Decl* TargetD = nullptr;
@@ -393,8 +439,8 @@ public:
       auto &AST = RD->getASTContext();
       auto &SM = AST.getSourceManager();
       llvm::Error Errors = llvm::Error::success();
-
-      std::string OverrideDeclStr = printOverrideDecl(TargetBM, RD, RD->getASTContext());
+      std::string OverrideDeclStr = makeOverrideDeclKeepingMacros(TargetBM, *Sel.AST);
+      // std::string OverrideDeclStr = printOverrideDecl(TargetBM, RD, RD->getASTContext());
 
       auto DeclStart = declStartFromSelection(Sel, RD);
       if (!DeclStart)
