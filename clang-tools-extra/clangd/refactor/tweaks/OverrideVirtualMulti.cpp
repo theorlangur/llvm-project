@@ -31,6 +31,7 @@
 #include "clang/Tooling/Core/Replacement.h"
 #include "clang/Tooling/Syntax/Tokens.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
@@ -155,10 +156,25 @@ namespace {
     }
     return S;
   }
+  
+  struct AllVirtualMethods
+  {
+    const CXXMethodDecl* MainD = nullptr;
+    llvm::DenseSet<const CXXMethodDecl*> AssociatedMethods;
+
+    bool containsIn(llvm::DenseSet<const CXXMethodDecl*> const& Existing) const
+    {
+      for(auto const *D : AssociatedMethods)
+        if (Existing.find(D) != Existing.end())
+          return true;
+      
+      return false;
+    }
+  };
 
   // Collect all virtual methods from base classes, recursing bases.
   static void collectBaseVirtuals(const CXXRecordDecl *RD,
-      SmallVectorImpl<const CXXMethodDecl*> &Out) {
+      SmallVectorImpl<AllVirtualMethods> &Out, llvm::DenseMap<const CXXMethodDecl*, int> &SeenMethods) {
     if (!RD) return;
     for (const auto &B : RD->bases()) {
       const Type *BT = B.getType().getTypePtrOrNull();
@@ -181,10 +197,38 @@ namespace {
           (void)Dtor;
           continue;
         }
-        Out.push_back(M->getCanonicalDecl());
+
+        int Idx;
+        AllVirtualMethods *AllM = nullptr;
+        auto *CanonM = M->getCanonicalDecl();
+        if (auto It = SeenMethods.find(CanonM); It != SeenMethods.end())
+        {
+          Idx = It->second;
+          AllM = &Out[It->second];
+        }else
+        {
+          Idx = (int)Out.size();
+          Out.push_back({});
+          AllM = &Out.back();
+          AllM->AssociatedMethods.insert(CanonM);
+          SeenMethods[CanonM] = Idx;
+        }
+
+        if (M->size_overridden_methods() == 0)
+        {
+          AllM->MainD = M;
+        }
+        else
+        {
+          for(auto *OvD : M->overridden_methods())
+          {
+            AllM->AssociatedMethods.insert(OvD);
+            SeenMethods[OvD] = Idx;
+          }
+        }
       }
       // Recurse
-      collectBaseVirtuals(Def, Out);
+      collectBaseVirtuals(Def, Out, SeenMethods);
     }
   }
 
@@ -274,11 +318,11 @@ public:
       if (!RD)
         return false;
       auto ExistingOverriden = buildOverriddenSet(RD);
-      SmallVector<const CXXMethodDecl*, 32> BaseMethods;
-      collectBaseVirtuals(RD, BaseMethods);
-      for (const CXXMethodDecl *BM : BaseMethods) {
-        //if (BM->isFinal()) continue; // can't override final methods
-        if (!ExistingOverriden.count(BM->getCanonicalDecl()))
+      llvm::DenseMap<const CXXMethodDecl*, int> SeenMethods;
+      SmallVector<AllVirtualMethods, 32> BaseMethods;
+      collectBaseVirtuals(RD, BaseMethods, SeenMethods);
+      for (const auto &BM : BaseMethods) {
+        if (!BM.containsIn(ExistingOverriden))
           return true;
       }
       return false;
@@ -299,15 +343,15 @@ public:
       if (!RD)
         return {};
       auto ExistingOverriden = buildOverriddenSet(RD);
-      SmallVector<const CXXMethodDecl*, 32> BaseMethods;
-      collectBaseVirtuals(RD, BaseMethods);
+      SmallVector<AllVirtualMethods, 32> BaseMethods;
+      llvm::DenseMap<const CXXMethodDecl*, int> SeenMethods;
+      collectBaseVirtuals(RD, BaseMethods, SeenMethods);
       std::vector<MultiInvocation> Res;
       Res.reserve(BaseMethods.size());
-      for (const CXXMethodDecl *BM : BaseMethods) {
-        auto *D = BM->getCanonicalDecl();
-        //if (BM->isFinal()) continue; // can't override final methods
-        if (!ExistingOverriden.count(BM->getCanonicalDecl()))
+      for (const auto &BM : BaseMethods) {
+        if (!BM.containsIn(ExistingOverriden))
         {
+          auto *D = BM.MainD->getCanonicalDecl();
           std::string TypeName = D->getQualifiedNameAsString();
           std::string Title = "Add override for ";
           Title += TypeName;
@@ -324,20 +368,20 @@ public:
         return error("Override cannot be applied, no class or struct found or inside a method");
 
       auto ExistingOverriden = buildOverriddenSet(RD);
-      SmallVector<const CXXMethodDecl*, 32> BaseMethods;
-      collectBaseVirtuals(RD, BaseMethods);
+      SmallVector<AllVirtualMethods, 32> BaseMethods;
+      llvm::DenseMap<const CXXMethodDecl*, int> SeenMethods;
+      collectBaseVirtuals(RD, BaseMethods, SeenMethods);
       std::vector<MultiInvocation> Res;
       Res.reserve(BaseMethods.size());
       const CXXMethodDecl *TargetBM = nullptr;
-      for (const CXXMethodDecl *BM : BaseMethods) {
-        auto *D = BM->getCanonicalDecl();
-        //if (BM->isFinal()) continue; // can't override final methods
-        if (!ExistingOverriden.count(D))
+      for (const auto &BM : BaseMethods) {
+        if (!BM.containsIn(ExistingOverriden))
         {
+          auto *D = BM.MainD->getCanonicalDecl();
           std::string TypeName = D->getQualifiedNameAsString();
           if (TypeName == Param)
           {
-            TargetBM = BM;
+            TargetBM = BM.MainD;
             //found
             break;
           }
