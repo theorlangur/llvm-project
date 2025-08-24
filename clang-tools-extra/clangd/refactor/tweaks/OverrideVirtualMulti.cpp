@@ -19,6 +19,7 @@
 #include "unittests/TestIndex.h"
 #include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/Attr.h"
+#include "clang/AST/Attrs.inc"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclCXX.h"
@@ -104,10 +105,15 @@ namespace {
       if (!Base) continue;
       const CXXRecordDecl *Def = Base->getDefinition();
       if (!Def) continue;
+      if (Def->isEffectivelyFinal())
+        continue;
       // Add virtual methods from this base.
       for (const CXXMethodDecl *M : Def->methods()) {
         if (!M->isVirtual() || isa<CXXConstructorDecl>(M) || isa<CXXConversionDecl>(M))
           continue;
+        if (M->hasAttr<clang::FinalAttr>())
+          continue;
+
         if (const auto *Dtor = dyn_cast<CXXDestructorDecl>(M)) {
           //we don't support Dtors
           (void)Dtor;
@@ -154,51 +160,24 @@ namespace {
     return Sig;
   }
 
-std::optional<Path> getSourceFile(llvm::StringRef FileName,
-                                  const Tweak::Selection &Sel) {
-  assert(Sel.FS);
-  if (auto Source = getCorrespondingHeaderOrSource(FileName, Sel.FS))
-    return *Source;
-  return getCorrespondingHeaderOrSource(FileName, *Sel.AST, Sel.Index);
-}
-
-// Synthesize a DeclContext for TargetNS from CurContext. TargetNS must be empty
-// for global namespace, and endwith "::" otherwise.
-// Returns std::nullopt if TargetNS is not a prefix of CurContext.
-std::optional<const DeclContext *>
-findContextForNS(llvm::StringRef TargetNS, const DeclContext *CurContext) {
-  assert(TargetNS.empty() || TargetNS.ends_with("::"));
-  // Skip any non-namespace contexts, e.g. TagDecls, functions/methods.
-  CurContext = CurContext->getEnclosingNamespaceContext();
-  // If TargetNS is empty, it means global ns, which is translation unit.
-  if (TargetNS.empty()) {
-    while (!CurContext->isTranslationUnit())
-      CurContext = CurContext->getParent();
-    return CurContext;
-  }
-  // Otherwise we need to drop any trailing namespaces from CurContext until
-  // we reach TargetNS.
-  std::string TargetContextNS =
-      CurContext->isNamespace()
-          ? llvm::cast<NamespaceDecl>(CurContext)->getQualifiedNameAsString()
-          : "";
-  TargetContextNS.append("::");
-
-  llvm::StringRef CurrentContextNS(TargetContextNS);
-  // If TargetNS is not a prefix of CurrentContext, there's no way to reach
-  // it.
-  if (!CurrentContextNS.starts_with(TargetNS))
+  static std::optional<SourceLocation> declStartFromSelection(const Tweak::Selection &S, const CXXRecordDecl *TargetRD) {
+    const Decl* TargetD = nullptr;
+    for (const SelectionTree::Node *N = S.ASTSelection.commonAncestor(); N; N = N->Parent) {
+      if (const Decl *D = N->ASTNode.get<Decl>()) {
+        if (D == TargetRD)
+          return std::nullopt;
+        TargetD = D;
+        break;
+      }
+    }  
+    if (TargetD)
+    {
+      auto &AST = TargetD->getASTContext();
+      auto &SM = AST.getSourceManager();
+      return SM.getFileLoc(TargetD->getBeginLoc());
+    }
     return std::nullopt;
-
-  while (CurrentContextNS != TargetNS) {
-    CurContext = CurContext->getParent();
-    // These colons always exists since TargetNS is a prefix of
-    // CurrentContextNS, it ends with "::" and they are not equal.
-    CurrentContextNS = CurrentContextNS.take_front(
-        CurrentContextNS.drop_back(2).rfind("::") + 2);
   }
-  return CurContext;
-}
 
 /// Override 1 virtual function from one of base classes
 /// TODO: describe
@@ -311,9 +290,12 @@ public:
 
       std::string OverrideDeclStr = printOverrideDecl(TargetBM, RD, RD->getASTContext());
 
+      auto DeclStart = declStartFromSelection(Sel, RD);
+      if (!DeclStart)
+        DeclStart = Sel.Cursor;
       tooling::Replacements OverrideDeclarations;
       if (auto Err = OverrideDeclarations.add(
-              tooling::Replacement(SM, Sel.Cursor, 0, OverrideDeclStr)))
+              tooling::Replacement(SM, *DeclStart, 0, OverrideDeclStr)))
         Errors = llvm::joinErrors(std::move(Errors), std::move(Err));
       
       if (Errors)
