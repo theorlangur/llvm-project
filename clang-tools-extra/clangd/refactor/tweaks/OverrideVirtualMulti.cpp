@@ -7,36 +7,26 @@
 //===----------------------------------------------------------------------===//
 
 #include "AST.h"
-#include "FindTarget.h"
-#include "HeaderSourceSwitch.h"
 #include "ParsedAST.h"
 #include "Selection.h"
 #include "SourceCode.h"
-#include "index/Index.h"
 #include "refactor/Tweak.h"
 #include "support/Logger.h"
 #include "support/Path.h"
-#include "unittests/TestIndex.h"
 #include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Attrs.inc"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclCXX.h"
-#include "clang/AST/DeclTemplate.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/Basic/TokenKinds.h"
 #include "clang/Tooling/Core/Replacement.h"
-#include "clang/Tooling/Syntax/Tokens.h"
-#include "clang/AST/RecursiveASTVisitor.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/Error.h"
-#include <cstddef>
 #include <optional>
 #include <string>
 
@@ -308,19 +298,23 @@ std::string makeOverrideDeclKeepingMacros(const CXXMethodDecl* BaseMD,
 /// Override 1 virtual function from one of base classes
 /// TODO: describe
 /// Before:
-/// a.h
-///   void foo();
-/// a.cc
-///   #include "a.h"
+/// class Base {
+/// public:
+///   virtual void method1(int param = 3) = 0; 
+/// };
+/// class Derived: public Base{
+/// public:
+///   <invoke here>
+/// };
 ///
 /// ----------------
 ///
 /// After:
-/// a.h
-///   void foo();
-/// a.cc
-///   #include "a.h"
-///   void foo() { return; }
+/// class Base ...;
+/// class Derived: public Base{
+/// public:
+///   virtual void method1(int param = 3) override;
+/// };
 class OverrideVirtualMulti : public Tweak {
 public:
   const char *id() const override;
