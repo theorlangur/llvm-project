@@ -151,11 +151,39 @@ getFunctionSourceAfterReplacements(const FunctionDecl *FD,
     TemplatePrefix.insert(0, S);
   };
   AddToTemplatePrefixIfApplicable(FD);
+
+  std::string BaseClassMethodCall;
   if (auto *MD = llvm::dyn_cast<CXXMethodDecl>(FD)) {
     for (const CXXRecordDecl *Parent = MD->getParent(); Parent;
          Parent =
              llvm::dyn_cast_or_null<const CXXRecordDecl>(Parent->getParent())) {
       AddToTemplatePrefixIfApplicable(Parent);
+    }
+
+    if (MD->size_overridden_methods() == 1)
+    {
+      llvm::raw_string_ostream OS(BaseClassMethodCall);
+      const CXXMethodDecl * ParentMD = *MD->begin_overridden_methods();
+      if (!ParentMD->isPureVirtual())
+      {
+        const CXXRecordDecl *Parent = ParentMD->getParent();
+        OS << Parent->getName();
+        OS << "::";
+        OS << MD->getName();
+        OS << "(";
+        for (unsigned I = 0, N = MD->getNumParams(); I < N; ++I) {
+          if (I) OS << ", ";
+          const auto *Param = MD->getParamDecl(I);
+          auto QT = Param->getType();
+          const auto *const ParamType = QT.getCanonicalType().getTypePtr();
+          bool RValRef = isa<RValueReferenceType>(ParamType);
+          if (RValRef) OS << "std::move(";
+          OS << Param->getName();
+          if (RValRef) OS << ")";
+        }
+        OS << ")";
+        BaseClassMethodCall= OS.str();
+      }
     }
   }
 
@@ -170,10 +198,24 @@ getFunctionSourceAfterReplacements(const FunctionDecl *FD,
   auto ReturnType = FD->getReturnType();
   if (!ReturnType->isVoidType())
   {
-    Source += "\n{\n/*TODO: Implement*/\nreturn {};\n}\n";
+    if (BaseClassMethodCall.empty())
+      Source += "\n{\n/*TODO: Implement*/\nreturn {};\n}\n";
+    else
+    {
+      Source += "\n{\n/*TODO: Implement*/\nreturn ";
+      Source += BaseClassMethodCall;
+      Source += ";\n}\n";
+    }
   }else
   {
-    Source += "\n{\n/*TODO: Implement*/\n}\n";
+    if (BaseClassMethodCall.empty())
+      Source += "\n{\n/*TODO: Implement*/\n}\n";
+    else
+    {
+      Source += "\n{\n/*TODO: Implement*/\nreturn ";
+      Source += BaseClassMethodCall;
+      Source += ";\n}\n";
+    }
   }
   return Source;
 }
@@ -531,7 +573,6 @@ public:
             std::move(HeaderFE->second));
       }
     }
-    
     return std::move(*Effect);
   }
 
