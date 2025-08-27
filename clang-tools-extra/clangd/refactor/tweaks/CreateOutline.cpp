@@ -1,11 +1,3 @@
-//===--- DefineOutline.cpp ---------------------------------------*- C++-*-===//
-//
-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-//
-//===----------------------------------------------------------------------===//
-
 #include "AST.h"
 #include "FindTarget.h"
 #include "HeaderSourceSwitch.h"
@@ -13,10 +5,10 @@
 #include "Selection.h"
 #include "SourceCode.h"
 #include "index/Index.h"
+#include "index/SymbolLocation.h"
 #include "refactor/Tweak.h"
 #include "support/Logger.h"
 #include "support/Path.h"
-#include "unittests/TestIndex.h"
 #include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
@@ -217,6 +209,7 @@ getFunctionSourceAfterReplacements(const FunctionDecl *FD,
       Source += ";\n}\n";
     }
   }
+  Source += "\n";
   return Source;
 }
 
@@ -415,6 +408,10 @@ struct InsertionPoint {
   size_t Offset;
 };
 
+struct InsertionPointExt: InsertionPoint{
+  Path CCFile;
+};
+
 /// Moves definition of a function/method to an appropriate implementation file.
 ///
 /// Before:
@@ -521,6 +518,15 @@ public:
     const SourceManager &SM = Sel.AST->getSourceManager();
     auto CCFile = SameFile ? Sel.AST->tuPath().str()
                            : getSourceFile(Sel.AST->tuPath(), Sel);
+    auto InsPointExt = !SameFile ? getInsertionPointExt(Sel) : std::nullopt;
+    if (InsPointExt)
+    {
+      if (!InsPointExt->CCFile.empty())
+        CCFile = InsPointExt->CCFile;
+      else
+        InsPointExt.reset();
+    }
+
     if (!CCFile)
       return error("Couldn't find a suitable implementation file.");
     assert(Sel.FS && "FS Must be set in apply");
@@ -530,7 +536,8 @@ public:
     if (!Buffer)
       return llvm::errorCodeToError(Buffer.getError());
     auto Contents = Buffer->get()->getBuffer();
-    auto InsertionPoint = getInsertionPoint(Contents, Sel);
+    using ExpInsertionPoint = llvm::Expected<InsertionPoint>;
+    ExpInsertionPoint InsertionPoint = InsPointExt ? ExpInsertionPoint(*InsPointExt) : getInsertionPoint(Contents, Sel);
     if (!InsertionPoint)
       return InsertionPoint.takeError();
 
@@ -576,6 +583,69 @@ public:
     return std::move(*Effect);
   }
 
+  std::optional<InsertionPointExt> getInsertionPointExt(const Selection &Sel) {
+    auto &SM = Sel.AST->getSourceManager();
+    auto TargetEnd = SM.getFileLoc(Source->getEndLoc());
+
+    SourceLocation ClosestFDAfterBeginDecl{};
+
+    std::string DefFileBefore, DefFileAfter;
+    SymbolLocation ClosestFDWithDefinitionAfter;
+    auto *Ctx = Source->getDeclContext();
+    for (DeclContext::specific_decl_iterator<FunctionDecl>
+        FDIt{Ctx->decls_begin()},
+        FDItEnd{Ctx->decls_end()};
+        FDIt != FDItEnd; ++FDIt) {
+      FunctionDecl *FD = *FDIt;
+      if (FD == Source || FD->doesThisDeclarationHaveABody())
+        continue;
+      SymbolLocation Def;
+      LookupRequest Req;
+      Req.IDs.insert(getSymbolID(FD));
+      Sel.Index->lookup(Req, [&](const Symbol &S){ 
+          if (S.Definition)
+            Def = S.Definition;
+      });
+
+      if (Def)
+      {
+        auto FDBegin = FD->getBeginLoc();
+        if (FDBegin > TargetEnd)
+        {
+          if (!ClosestFDWithDefinitionAfter || (ClosestFDAfterBeginDecl > FDBegin))
+          {
+            ClosestFDWithDefinitionAfter = Def;
+            DefFileAfter = Def.FileURI;
+            ClosestFDAfterBeginDecl = FDBegin;
+            //no reason to traverse further
+            break;
+          }
+        }
+      }
+    }
+
+    InsertionPointExt Res;
+    if (!DefFileAfter.empty())
+    {
+      auto Path = URI::resolve(DefFileAfter, Sel.AST->tuPath());
+      if (Path)
+      {
+        auto Buffer = Sel.FS->getBufferForFile(*Path);
+        if (Buffer)
+        {
+          if (auto Sz = clangd::positionToOffset((*Buffer)->getBuffer(), {(int)ClosestFDWithDefinitionAfter.Start.line(), 0}))
+          {
+            Res.Offset = *Sz;
+            Res.CCFile = *Path;
+            Res.EnclosingNamespace = Source->getEnclosingNamespaceContext();
+            return Res;
+          }
+        }
+      }
+    }
+    return std::nullopt;
+  };
+
   // Returns the most natural insertion point for \p QualifiedName in \p
   // Contents. This currently cares about only the namespace proximity, but in
   // feature it should also try to follow ordering of declarations. For example,
@@ -597,7 +667,7 @@ public:
       const SourceLocation EndLoc = Klass->getBraceRange().getEnd();
       const auto &TokBuf = Sel.AST->getTokens();
       auto Tokens = TokBuf.expandedTokens();
-      auto It = llvm::lower_bound(
+      const auto *It = llvm::lower_bound(
           Tokens, EndLoc, [](const syntax::Token &Tok, SourceLocation EndLoc) {
             return Tok.location() < EndLoc;
           });
