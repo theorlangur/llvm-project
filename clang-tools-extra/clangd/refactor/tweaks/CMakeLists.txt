@@ -17,6 +17,7 @@ add_clang_library(clangDaemonTweaks OBJECT
   DumpAST.cpp
   DefineInline.cpp
   DefineOutline.cpp
+  ChangeSignature.cpp
   CreateOutline.cpp
   ExpandDeducedType.cpp
   ExpandMacro.cpp
