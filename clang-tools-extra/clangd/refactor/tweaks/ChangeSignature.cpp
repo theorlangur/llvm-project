@@ -115,8 +115,7 @@ namespace clangd {
         ParamDesc PD;
         PD.Pos = Idx++;
         PD.Spelling = getText(SM, Lang, P->getSourceRange());
-        if (auto *TSI = P->getTypeSourceInfo())
-          PD.Type = getText(SM, Lang, TSI->getTypeLoc().getSourceRange());
+        PD.Type = P->getType().getAsString();
         PD.Name = P->getNameAsString();
         if (P->hasDefaultArg())
         {
@@ -264,14 +263,16 @@ namespace clangd {
             NewParams_ = std::move(*NewParams);
             //match old with new (name based), best effort
             //the rest as-is
-            for(size_t Idx = 0, N = OldParams.size(); Idx < N; ++Idx)
+            for(auto &P : NewParams_)
             {
-              for(auto &P : NewParams_)
+              P.Pos = -1;
+              for(size_t Idx = 0, N = OldParams.size(); Idx < N; ++Idx)
               {
-                if (P.Name == OldParams[Idx].Name)
+                if ((P.Name == OldParams[Idx].Name) && (P.Type == OldParams[Idx].Type))
+                {
                   P.Pos = Idx;
-                else
-                  P.Pos = -1;
+                  break;
+                }
               }
             }
             return true;
@@ -298,6 +299,28 @@ namespace clangd {
             //Sig += P.Type;
             //Sig += ' ';
             //Sig += P.Name;
+          }
+          Sig += ")";
+          return tooling::Replacement(SM, DelRange, Sig);
+        }
+
+        tooling::Replacement updateDefinition(SourceLocation LParen, SourceLocation RParen, const SourceManager &SM)
+        {
+          CharSourceRange DelRange = CharSourceRange::getTokenRange(LParen, RParen);
+          std::string Sig;
+          Sig.reserve(NewSignature_.size() * 2);
+          for(auto const& P : NewParams_)
+          {
+            if (Sig.empty())
+            {
+              Sig = "(";
+            }else
+            {
+              Sig += ", ";
+            }
+            Sig += P.Type;
+            Sig += ' ';
+            Sig += P.Name;
           }
           Sig += ")";
           return tooling::Replacement(SM, DelRange, Sig);
@@ -362,7 +385,9 @@ namespace clangd {
                 if (ASTIt != ASTs.end())
                 {
                   decltype(&ChangeSignature::changeDeclWithLexer) ChangeMethod = nullptr;
-                  if ((R.Kind & (RefKind::Declaration | RefKind::Definition)) != RefKind::Unknown)
+                  if ((R.Kind & (RefKind::Definition)) != RefKind::Unknown)
+                    ChangeMethod = &ChangeSignature::changeDefWithLexer;
+                  else if ((R.Kind & (RefKind::Declaration)) != RefKind::Unknown)
                     ChangeMethod = &ChangeSignature::changeDeclWithLexer;
                   else if ((R.Kind & RefKind::Call) != RefKind::Unknown)
                     ChangeMethod = &ChangeSignature::changeCallWithLexer;
@@ -406,6 +431,27 @@ namespace clangd {
           return std::make_unique<LexEntry>(std::move(FileSM), std::move(Tokens), std::move(MB));
         }
 
+        bool balanceParenTypes(clang::syntax::Token const &Tok, unsigned &Pairs)
+        {
+          switch(Tok.kind())
+          {
+            case tok::TokenKind::l_paren:
+            case tok::TokenKind::l_brace:
+            case tok::TokenKind::l_square:
+            case tok::TokenKind::less:
+              ++Pairs;
+              return true;
+            case tok::TokenKind::r_paren:
+            case tok::TokenKind::r_brace:
+            case tok::TokenKind::r_square:
+            case tok::TokenKind::greater:
+              --Pairs;
+              return true;
+            default:
+              return false;
+          }
+        }
+
         std::optional<tooling::Replacement> changeDeclWithLexer(LexEntry &LE, const LangOptions &Lang, SymbolLocation const& L)
         {
           auto &SM = LE.SMF.get();
@@ -437,23 +483,7 @@ namespace clangd {
                 for(++Index;Index < Last; ++Index)
                 {
                   const auto &Tok = Tokens[Index];
-                  switch(Tok.kind())
-                  {
-                    case tok::TokenKind::l_paren:
-                    case tok::TokenKind::l_brace:
-                    case tok::TokenKind::l_square:
-                    case tok::TokenKind::less:
-                      ++Pairs;
-                      break;
-                    case tok::TokenKind::r_paren:
-                    case tok::TokenKind::r_brace:
-                    case tok::TokenKind::r_square:
-                    case tok::TokenKind::greater:
-                      --Pairs;
-                      break;
-                    default:
-                      break;
-                  }
+                  balanceParenTypes(Tok, Pairs);
                   if (!Pairs)
                   {
                     SigEnd = Tok.location();
@@ -465,6 +495,51 @@ namespace clangd {
             }
           }
           return updateDeclaration(SigStart, SigEnd, SM);
+        }
+
+        std::optional<tooling::Replacement> changeDefWithLexer(LexEntry &LE, const LangOptions &Lang, SymbolLocation const& L)
+        {
+          auto &SM = LE.SMF.get();
+
+          SourceLocation TargetStart;
+          unsigned OffsetStart;
+          if (auto Sz = clangd::positionToOffset(LE.MB->getBuffer(), {(int)L.Start.line(), (int)L.Start.column()}))
+          {
+            TargetStart = SM.getComposedLoc(SM.getMainFileID(), *Sz);
+            OffsetStart = *Sz;
+          }
+
+          if (TargetStart.isInvalid())
+            return std::nullopt;
+
+          SourceLocation SigStart, SigEnd;
+          const auto &Tokens = LE.Tokens;
+          unsigned Last = Tokens.size() - 1;
+          for (unsigned Index = 0; Index < Last; ++Index) {
+            const auto &Tok = Tokens[Index];
+            if (Tok.range(SM).contains(OffsetStart))
+            {
+              unsigned Pairs = 0;
+              ++Index;
+              if (Tokens[Index].kind() == tok::TokenKind::l_paren)
+              {
+                SigStart = Tokens[Index].location();
+                ++Pairs;
+                for(++Index;Index < Last; ++Index)
+                {
+                  const auto &Tok = Tokens[Index];
+                  balanceParenTypes(Tok, Pairs);
+                  if (!Pairs)
+                  {
+                    SigEnd = Tok.location();
+                    break;
+                  }
+                }
+              }
+              break;
+            }
+          }
+          return updateDefinition(SigStart, SigEnd, SM);
         }
 
         std::optional<tooling::Replacement> changeCallWithLexer(LexEntry &LE, const LangOptions &Lang, SymbolLocation const& L)
@@ -500,21 +575,8 @@ namespace clangd {
                 for(++Index;Index < Last; ++Index)
                 {
                   const auto &Tok = Tokens[Index];
-                  switch(Tok.kind())
+                  if (Tok.kind() == tok::TokenKind::comma)
                   {
-                    case tok::TokenKind::l_paren:
-                    case tok::TokenKind::l_brace:
-                    case tok::TokenKind::l_square:
-                    case tok::TokenKind::less:
-                      ++Pairs;
-                      break;
-                    case tok::TokenKind::r_paren:
-                    case tok::TokenKind::r_brace:
-                    case tok::TokenKind::r_square:
-                    case tok::TokenKind::greater:
-                      --Pairs;
-                      break;
-                    case tok::TokenKind::comma:
                       if (ArgStart.isValid())//could be asserted
                       {
                         if (Tokens[Index - 1].location() == ArgStart)
@@ -525,10 +587,9 @@ namespace clangd {
                         CallArguments.emplace_back(Lexer::getSourceText(CSR, SM, Lang));
                         ArgStart = {};
                       }
-                      break;
-                    default:
-                      break;
-                  }
+                  }else
+                    balanceParenTypes(Tok, Pairs);
+
                   if (!Pairs)
                   {
                     CallEnd = Tok.location();
@@ -587,60 +648,6 @@ namespace clangd {
         std::string NewSignature_;
         std::vector<ParamDesc> NewParams_;
     };
-
-
-    /*
-       auto ASTIt = ASTs.find(*Path);
-       if (ASTIt == ASTs.end())
-       {
-       auto Buffer = Sel.FS->getBufferForFile(*Path);
-       if (Buffer)
-       {
-       ASTs[*Path].AST = Sel.Server->buildAST(*Path, (*Buffer)->getBuffer());
-       ASTIt = ASTs.find(*Path);
-       }
-       }
-       if (ASTIt != ASTs.end())
-       {
-    //Do stuff here
-    auto Buffer = Sel.FS->getBufferForFile(*Path);
-    if (Buffer)
-    {
-    if (auto Sz = clangd::positionToOffset((*Buffer)->getBuffer(), {(int)L.Start.line(), (int)L.Start.column()}))
-    {
-    ParsedAST &AST = *ASTIt->second.AST;
-    auto &Replacements = ASTIt->second.Replacements;
-    auto &SM = AST.getSourceManager();
-    SourceLocation RefLoc = SM.getComposedLoc(SM.getMainFileID(), *Sz);
-    auto D = locateDeclAt(AST, RefLoc);
-    if (D)
-    {
-    auto R = std::visit(
-    overloaded{
-    [&](const CallExpr *CE)->llvm::Expected<tooling::Replacement>{
-    return error("Not implemented for CallExpr");
-    },
-    [&](const FunctionDecl *FD)->llvm::Expected<tooling::Replacement>{
-    return updateDeclaration(FD, SM);
-    }
-    },
-     *D
-     );
-     if (R)
-     {
-     if (auto Err =
-     Replacements.add(*R))
-     {
-     Errors = llvm::joinErrors(
-     std::move(Errors),
-     error("could not create a replacement"));
-     }
-     }
-     }
-     }
-     }
-     }
-     */
 
     REGISTER_TWEAK(ChangeSignature)
 
