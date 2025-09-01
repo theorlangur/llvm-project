@@ -340,6 +340,7 @@ public:
   /// Mostly useful for synchronizing tests.
   bool blockUntilIdle(Deadline D) const;
 
+  std::optional<ParsedAST> buildAST(PathRef File, ParseInputs Inputs);
 private:
   /// This class stores per-file data in the Files map.
   struct FileData;

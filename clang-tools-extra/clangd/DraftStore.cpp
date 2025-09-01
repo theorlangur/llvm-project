@@ -123,5 +123,15 @@ llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> DraftStore::asVFS() const {
                        Draft.getValue().D.Contents, Draft.getKey()));
   return MemFS;
 }
+llvm::IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> DraftStore::asVFSInMem() const
+{
+  auto MemFS = llvm::makeIntrusiveRefCnt<llvm::vfs::InMemoryFileSystem>();
+  std::lock_guard<std::mutex> Guard(Mutex);
+  for (const auto &Draft : Drafts)
+    MemFS->addFile(Draft.getKey(), Draft.getValue().MTime,
+                   std::make_unique<SharedStringBuffer>(
+                       Draft.getValue().D.Contents, Draft.getKey()));
+  return MemFS;
+}
 } // namespace clangd
 } // namespace clang

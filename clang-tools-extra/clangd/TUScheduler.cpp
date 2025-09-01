@@ -1774,6 +1774,22 @@ void TUScheduler::runWithAST(
   It->second->Worker->runWithAST(Name, std::move(Action), Invalidation);
 }
 
+std::optional<ParsedAST> TUScheduler::buildAST(PathRef File, ParseInputs Inputs)
+{
+  StoreDiags CompilerInvocationDiagConsumer;
+  std::unique_ptr<CompilerInvocation> Invocation =
+    buildCompilerInvocation(Inputs, CompilerInvocationDiagConsumer);
+  // Try rebuilding the AST.
+  std::optional<ParsedAST> NewAST;
+  if (Invocation) {
+    PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->tryFindPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
+    return ParsedAST::build(File, Inputs, std::move(Invocation),
+        CompilerInvocationDiagConsumer.take(),
+        nullptr, &PCH);
+  }
+  return std::nullopt;
+}
+
 void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
                                   PreambleConsistency Consistency,
                                   Callback<InputsAndPreamble> Action) {

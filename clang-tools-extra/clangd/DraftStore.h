@@ -49,6 +49,7 @@ public:
   void removeDraft(PathRef File);
 
   llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> asVFS() const;
+  llvm::IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> asVFSInMem() const;
 
 private:
   struct DraftAndTime {

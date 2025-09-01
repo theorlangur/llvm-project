@@ -483,6 +483,7 @@ public:
   /// Builds a nested representation of memory used by components.
   void profile(MemoryTree &MT) const;
 
+  std::optional<ParsedAST> buildAST(PathRef File, StringRef Contents);
 private:
   FeatureModuleSet *FeatureModules;
   const GlobalCompilationDatabase &CDB;
