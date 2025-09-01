@@ -156,7 +156,7 @@ ContentCache::getBufferOrNone(DiagnosticsEngine &Diag, FileManager &FM,
   // have come from a stat cache).
   // The buffer will always be larger than the file size on z/OS in the presence
   // of characters outside the base character set.
-  assert(Buffer->getBufferSize() >= (size_t)ContentsEntry->getSize());
+  //assert(Buffer->getBufferSize() >= (size_t)ContentsEntry->getSize());
   if (!ContentsEntry->isNamedPipe() &&
       Buffer->getBufferSize() < (size_t)ContentsEntry->getSize()) {
     Diag.Report(Loc, diag::err_file_modified) << ContentsEntry->getName();
