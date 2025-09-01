@@ -1,6 +1,4 @@
 #include "AST.h"
-#include "FindTarget.h"
-#include "HeaderSourceSwitch.h"
 #include "ParsedAST.h"
 #include "Selection.h"
 #include "SourceCode.h"
@@ -16,7 +14,6 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclCXX.h"
-#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -25,14 +22,14 @@
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Tooling/Core/Replacement.h"
 #include "clang/Tooling/Syntax/Tokens.h"
-#include "clang/Tooling/Tooling.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/Error.h"
 #include <cstddef>
 #include <optional>
 #include <string>
+
+//1. add support for return type change
+//2. add support for +<type> <arg> syntax to add new arguments
 
 namespace clang {
 namespace clangd {
