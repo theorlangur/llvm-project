@@ -60,9 +60,9 @@ getAllTweaks(const FeatureModuleSet *Modules) {
 Tweak::Selection::Selection(const SymbolIndex *Index, ParsedAST &AST,
                             unsigned RangeBegin, unsigned RangeEnd,
                             SelectionTree ASTSelection,
-                            llvm::vfs::FileSystem *FS)
+                            llvm::vfs::FileSystem *FS, class ClangdServer *Serv)
     : Index(Index), AST(&AST), SelectionBegin(RangeBegin),
-      SelectionEnd(RangeEnd), ASTSelection(std::move(ASTSelection)), FS(FS) {
+      SelectionEnd(RangeEnd), ASTSelection(std::move(ASTSelection)), FS(FS), Server(Serv) {
   auto &SM = AST.getSourceManager();
   Code = SM.getBufferData(SM.getMainFileID());
   Cursor = SM.getComposedLoc(SM.getMainFileID(), RangeBegin);

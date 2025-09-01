@@ -790,7 +790,7 @@ namespace {
 // vector of pointers because GCC doesn't like non-copyable Selection.
 llvm::Expected<std::vector<std::unique_ptr<Tweak::Selection>>>
 tweakSelection(const Range &Sel, const InputsAndAST &AST,
-               llvm::vfs::FileSystem *FS, TUScheduler *TUSched, ClangdServer *Serv) {
+               llvm::vfs::FileSystem *FS, ClangdServer *Serv) {
   auto Begin = positionToOffset(AST.Inputs.Contents, Sel.start);
   if (!Begin)
     return Begin.takeError();
@@ -802,7 +802,7 @@ tweakSelection(const Range &Sel, const InputsAndAST &AST,
       AST.AST.getASTContext(), AST.AST.getTokens(), *Begin, *End,
       [&](SelectionTree T) {
         Result.push_back(std::make_unique<Tweak::Selection>(
-            AST.Inputs.Index, AST.AST, *Begin, *End, std::move(T), FS, TUSched, Serv));
+            AST.Inputs.Index, AST.AST, *Begin, *End, std::move(T), FS, Serv));
         return false;
       });
   assert(!Result.empty() && "Expected at least one SelectionTree");
@@ -869,7 +869,7 @@ void ClangdServer::codeAction(const CodeActionInputs &Params,
     }
 
     // Collect Tweaks
-    auto Selections = tweakSelection(Params.Selection, *InpAST, /*FS=*/nullptr, &*Server->WorkScheduler, Server);
+    auto Selections = tweakSelection(Params.Selection, *InpAST, /*FS=*/nullptr, Server);
     if (!Selections)
       return CB(Selections.takeError());
     // Don't allow a tweak to fire more than once across ambiguous selections.
@@ -916,7 +916,7 @@ void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID, String
     if (!InpAST)
       return CB(InpAST.takeError());
     auto FS = DirtyFS->view(std::nullopt);
-    auto Selections = tweakSelection(Sel, *InpAST, FS.get(), &*WorkScheduler, this);
+    auto Selections = tweakSelection(Sel, *InpAST, FS.get(), this);
     if (!Selections)
       return CB(Selections.takeError());
     std::optional<llvm::Expected<Tweak::Effect>> Effect;

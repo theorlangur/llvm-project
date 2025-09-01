@@ -33,6 +33,7 @@
 namespace clang {
 namespace clangd {
 
+class ClangdServer;
 class FeatureModuleSet;
 
 /// An interface base for small context-sensitive refactoring actions.
@@ -49,7 +50,7 @@ public:
   struct Selection {
     Selection(const SymbolIndex *Index, ParsedAST &AST, unsigned RangeBegin,
               unsigned RangeEnd, SelectionTree ASTSelection,
-              llvm::vfs::FileSystem *VFS);
+              llvm::vfs::FileSystem *VFS, class ClangdServer *Serv = nullptr);
     /// The text of the active document.
     llvm::StringRef Code;
     /// The Index for handling codebase related queries.
@@ -69,6 +70,7 @@ public:
     /// This is only populated when applying a tweak, not during prepare.
     llvm::vfs::FileSystem *FS = nullptr;
     // FIXME: provide a way to get sources and ASTs for other files.
+    ClangdServer *Server = nullptr;
   };
 
   struct Effect {
