@@ -940,6 +940,7 @@ void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID, String
         Edit &E = It.second;
         format::FormatStyle Style =
             getFormatStyleForFile(File, E.InitialCode, TFS, false);
+        Style.BreakBeforeBraces =  format::FormatStyle::BraceBreakingStyle::BS_Stroustrup;
         if (llvm::Error Err = reformatEdit(E, Style))
           elog("Failed to format {0}: {1}", It.first(), std::move(Err));
       }

@@ -807,7 +807,7 @@ enum class ErrorResultCode : int {
   CheckFailed = 3
 };
 
-static const char *PCHVers = "PCH ver. 1.06";
+static const char *PCHVers = "PCH ver. 1.07";
 int clangdMain(int argc, char *argv[]) {
   // Clang could run on the main thread. e.g., when the flag '-check' or '-sync'
   // is enabled.
