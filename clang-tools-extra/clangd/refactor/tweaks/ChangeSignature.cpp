@@ -29,8 +29,6 @@
 #include <string>
 
 //1. add support for return type change
-//2. add support for +<type> <arg> syntax to add new arguments
-//3. add support for virtual methods
 //4. add/remove const (probably a separate tweak)
 
 namespace clang {
@@ -114,7 +112,7 @@ namespace clangd {
         ParamDesc PD;
         PD.Pos = Idx++;
         PD.Spelling = getText(SM, Lang, P->getSourceRange());
-        PD.Type = P->getType().getAsString();
+        PD.Type = P->getType().getAsString(PrintingPolicy(Lang));
         PD.Name = P->getNameAsString();
         if (P->hasDefaultArg())
         {
@@ -215,6 +213,53 @@ namespace clangd {
           return std::string("Change a function/method signature to ") + NewSignature_;
         }
 
+        void checkForNewParamSuperset(std::vector<ParamDesc> const& OldParams)
+        {
+            if (NewParams_.size() >= OldParams.size())
+            {
+              NewSignatureIsASuperset = true;
+              for(int Pos = 0, N = (int)OldParams.size(); Pos < N; ++Pos)
+              {
+                if (NewParams_[Pos].Pos != Pos)
+                {
+                  NewSignatureIsASuperset = false;
+                  break;
+                }
+              }
+              if (NewSignatureIsASuperset)
+              {
+                //check that the rest of new (if there are any) have default values
+                for(int Pos = (int)OldParams.size(), N = (int)NewParams_.size(); Pos < N; ++Pos)
+                {
+                  if (NewParams_[Pos].Default.empty())
+                  {
+                    NewSignatureIsASuperset = false;
+                    break;
+                  }
+                }
+              }
+            }else
+              NewSignatureIsASuperset = false;
+        }
+
+        void matchOldWithNewParams(std::vector<ParamDesc> const& OldParams)
+        {
+            //match old with new (name based), best effort
+            //the rest as-is
+            for(auto &P : NewParams_)
+            {
+              P.Pos = -1;
+              for(size_t Idx = 0, N = OldParams.size(); Idx < N; ++Idx)
+              {
+                if ((P.Name == OldParams[Idx].Name) && (P.Type == OldParams[Idx].Type))
+                {
+                  P.Pos = Idx;
+                  break;
+                }
+              }
+            }
+        }
+
         bool prepare(const Selection &Sel) override {
 
           const FunctionDecl *FD = selectedFunctionDecl(Sel);
@@ -260,20 +305,8 @@ namespace clangd {
               return false;
             auto OldParams = getParametersFromFunctionDecl(FD, SM, Lang);
             NewParams_ = std::move(*NewParams);
-            //match old with new (name based), best effort
-            //the rest as-is
-            for(auto &P : NewParams_)
-            {
-              P.Pos = -1;
-              for(size_t Idx = 0, N = OldParams.size(); Idx < N; ++Idx)
-              {
-                if ((P.Name == OldParams[Idx].Name) && (P.Type == OldParams[Idx].Type))
-                {
-                  P.Pos = Idx;
-                  break;
-                }
-              }
-            }
+            matchOldWithNewParams(OldParams);
+            checkForNewParamSuperset(OldParams);
             return true;
           }
 
@@ -287,12 +320,15 @@ namespace clangd {
                 NewSignature_ += ", ";
               NewSignature_ += P.Spelling;
             }
-            NewSignature_ += ", ";
+            if (!OldParams.empty())
+              NewSignature_ += ", ";
             NewSignature_ += NewParamsStr;
             auto NewParams = getParametersFromAlternativeSignature(NewSignature_, FD, SM, Lang, Sel.Server, Sel.AST->tuPath());
             if (!NewParams)
               return false;
             NewParams_ = std::move(*NewParams);
+            matchOldWithNewParams(OldParams);
+            checkForNewParamSuperset(OldParams);
             return true;
           }
 
@@ -354,6 +390,27 @@ namespace clangd {
           return updateDeclaration(LParen, RParen, SM);
         }
 
+        void collectAllRelatedBaseVirtuals(CXXMethodDecl const* M, RefsRequest &Refs)
+        {
+          for(const auto *OM : M->overridden_methods())
+          {
+            Refs.IDs.insert(getSymbolID(OM));
+            collectAllRelatedBaseVirtuals(OM, Refs);
+          }
+        }
+
+        void collectAllRelatedVirtuals(CXXMethodDecl const* M, RefsRequest &Refs, const SymbolIndex *Index)
+        {
+          collectAllRelatedBaseVirtuals(M, Refs);
+
+          RelationsRequest Req;
+          Req.Predicate = RelationKind::OverriddenBy;
+          Req.Subjects = Refs.IDs;//copy
+          Index->relations(Req, [&](const SymbolID &Subject, const Symbol &Object) {
+              Refs.IDs.insert(Object.ID);
+          });
+        }
+
         struct LexEntry
         {
           LexEntry(SourceManagerForFile &&_SMF, std::vector<syntax::Token> &&_Tokens, std::unique_ptr<llvm::MemoryBuffer> &&_MB): 
@@ -400,6 +457,9 @@ namespace clangd {
           RefsRequest Refs;
           llvm::Error Errors = llvm::Error::success();
           Refs.IDs.insert(getSymbolID(FD));
+          if (const auto *M = llvm::dyn_cast<CXXMethodDecl>(FD); M && M->isVirtual())
+            collectAllRelatedVirtuals(M, Refs ,Sel.Index);
+
           Refs.Filter = RefKind::Declaration | RefKind::Definition | RefKind::Call;
           Sel.Index->refs(Refs, [&](const Ref& R)->void{
               auto L = R.Location;
@@ -425,7 +485,7 @@ namespace clangd {
                     ChangeMethod = &ChangeSignature::changeDefWithLexer;
                   else if ((R.Kind & (RefKind::Declaration)) != RefKind::Unknown)
                     ChangeMethod = &ChangeSignature::changeDeclWithLexer;
-                  else if ((R.Kind & RefKind::Call) != RefKind::Unknown)
+                  else if (!NewSignatureIsASuperset && ((R.Kind & RefKind::Call) != RefKind::Unknown))
                     ChangeMethod = &ChangeSignature::changeCallWithLexer;
 
                   if (ChangeMethod)
@@ -530,6 +590,8 @@ namespace clangd {
               break;
             }
           }
+          if (SigStart.isInvalid() || SigEnd.isInvalid())
+            return std::nullopt;
           return updateDeclaration(SigStart, SigEnd, SM);
         }
 
@@ -575,6 +637,8 @@ namespace clangd {
               break;
             }
           }
+          if (SigStart.isInvalid() || SigEnd.isInvalid())
+            return std::nullopt;
           return updateDefinition(SigStart, SigEnd, SM);
         }
 
@@ -650,6 +714,9 @@ namespace clangd {
             }
           }
 
+          if (CallStart.isInvalid() || CallEnd.isInvalid())
+            return std::nullopt;
+
           std::string NewSig;
           for(int I = 0, N = (int)NewParams_.size(); I < N; ++I)
           {
@@ -683,6 +750,7 @@ namespace clangd {
       private:
         std::string NewSignature_;
         std::vector<ParamDesc> NewParams_;
+        bool NewSignatureIsASuperset = false;
     };
 
     REGISTER_TWEAK(ChangeSignature)
