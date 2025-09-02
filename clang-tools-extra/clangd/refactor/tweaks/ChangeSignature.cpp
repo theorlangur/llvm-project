@@ -30,6 +30,8 @@
 
 //1. add support for return type change
 //2. add support for +<type> <arg> syntax to add new arguments
+//3. add support for virtual methods
+//4. add/remove const (probably a separate tweak)
 
 namespace clang {
 namespace clangd {
@@ -275,6 +277,25 @@ namespace clangd {
             return true;
           }
 
+          if (Comment.starts_with("+"))
+          {
+            StringRef NewParamsStr = Comment.drop_front(1);
+            auto OldParams = getParametersFromFunctionDecl(FD, SM, Lang);
+            for(auto const& P : OldParams)
+            {
+              if (!NewSignature_.empty())
+                NewSignature_ += ", ";
+              NewSignature_ += P.Spelling;
+            }
+            NewSignature_ += ", ";
+            NewSignature_ += NewParamsStr;
+            auto NewParams = getParametersFromAlternativeSignature(NewSignature_, FD, SM, Lang, Sel.Server, Sel.AST->tuPath());
+            if (!NewParams)
+              return false;
+            NewParams_ = std::move(*NewParams);
+            return true;
+          }
+
           return false;
         }
 
@@ -346,6 +367,24 @@ namespace clangd {
           const FunctionDecl *FD = selectedFunctionDecl(Sel);
           if (!FD)
             return error("No function/method declaration found");
+
+          if (!NewParams_.empty())
+          {
+            //validate defaults
+            bool ExpectedDefault = false;
+            for(auto const& P : NewParams_)
+            {
+              if (P.Default.empty() && ExpectedDefault)
+              {
+                std::string Err = "Parameter ";
+                Err += P.Spelling;
+                Err += " must have a default";
+                return error(Err);
+              }
+              if (!P.Default.empty())
+                ExpectedDefault = true;
+            }
+          }
 
           Tweak::Effect Effect;
 
