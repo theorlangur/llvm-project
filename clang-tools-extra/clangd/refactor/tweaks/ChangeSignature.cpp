@@ -626,10 +626,7 @@ namespace clangd {
                   {
                       if (ArgStart.isValid())//could be asserted
                       {
-                        if (Tokens[Index - 1].location() == ArgStart)
-                          ArgEnd = Tokens[Index - 1].endLocation();
-                        else
-                          ArgEnd = Tokens[Index - 1].location();
+                        ArgEnd = Tokens[Index - 1].endLocation();
                         CharSourceRange CSR = CharSourceRange::getCharRange(ArgStart, ArgEnd);
                         CallArguments.emplace_back(Lexer::getSourceText(CSR, SM, Lang));
                         ArgStart = {};
@@ -642,10 +639,7 @@ namespace clangd {
                     CallEnd = Tok.location();
                     if (ArgStart.isValid())
                     {
-                        if (Tokens[Index - 1].location() == ArgStart)
-                          ArgEnd = Tokens[Index - 1].endLocation();
-                        else
-                          ArgEnd = Tokens[Index - 1].location();
+                        ArgEnd = Tokens[Index - 1].endLocation();
                         CharSourceRange CSR = CharSourceRange::getCharRange(ArgStart, ArgEnd);
                         CallArguments.emplace_back(Lexer::getSourceText(CSR, SM, Lang));
                     }
