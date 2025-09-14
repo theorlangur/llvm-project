@@ -70,6 +70,11 @@ namespace clangd {
 
         bool TraverseFunctionDecl(FunctionDecl *D) {
           if (Contains(D->getSourceRange())) {
+            if (auto *B = D->getBody(); B && Contains(B->getSourceRange()))
+            {
+              Best = nullptr;
+              return false;
+            }
             Best = D;
             return false;
           }
@@ -77,6 +82,11 @@ namespace clangd {
         }
         bool TraverseCXXMethodDecl(CXXMethodDecl *D) {
           if (Contains(D->getSourceRange())) {
+            if (auto *B = D->getBody(); B && Contains(B->getSourceRange()))
+            {
+              Best = nullptr;
+              return false;
+            }
             Best = D;
             return false;
           }
