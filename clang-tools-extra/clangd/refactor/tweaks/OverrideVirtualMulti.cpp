@@ -72,24 +72,18 @@ namespace {
       const CXXRecordDecl *&Best; unsigned &BestSpan;
 
       bool TraverseFunctionDecl(FunctionDecl *D) {
-        if (auto *Body = D->getBody())
+        if (Contains(D->getSourceRange()))
         {
-          if (Contains(Body->getSourceRange()))
-            {
-              Best = nullptr;
-              return false;
-            }
+          Best = nullptr;
+          return false;
         }
         return RecursiveASTVisitor::TraverseFunctionDecl(D);
       }
       bool TraverseCXXMethodDecl(CXXMethodDecl *D) {
-        if (auto *Body = D->getBody())
+        if (Contains(D->getSourceRange()))
         {
-          if (Contains(Body->getSourceRange()))
-            {
-              Best = nullptr;
-              return false;
-            }
+          Best = nullptr;
+          return false;
         }
         return RecursiveASTVisitor::TraverseCXXMethodDecl(D);
       }
