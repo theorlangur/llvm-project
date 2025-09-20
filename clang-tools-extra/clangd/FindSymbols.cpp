@@ -386,7 +386,7 @@ getWorkspaceSymbolsV2(llvm::StringRef Query, int Limit,
   if (M == Mode::ScopeWithName)
   {
     int MaxPossibleScore = Query.size() * 3;
-    MatchResults = SW.match_par(Query, std::move(TargetCharSrc), {MaxPossibleScore / 2/*score threshold*/, true/*sort results*/});
+    MatchResults = SW.match_par(Query, std::move(TargetCharSrc), {MaxPossibleScore / 2/*score threshold*/, false/*sort results*/});
   }else
   {
     int MaxPossibleScoreName = NameQuery.size() * 3;
@@ -417,13 +417,13 @@ getWorkspaceSymbolsV2(llvm::StringRef Query, int Limit,
     MatchResults.reserve(MergedSymbolScores.size());
     for(auto const& [key, val] : MergedSymbolScores)
       MatchResults.emplace_back(val.PSrc, val.Score);
-    std::sort(MatchResults.begin(), MatchResults.end(), [](auto const&I1, auto const&I2)
-        { 
-          if (I1.score != I2.score)
-            return I1.score > I2.score; 
-          return I1.target->length() < I2.target->length();
-        });
   }
+  std::sort(MatchResults.begin(), MatchResults.end(), [](auto const&I1, auto const&I2)
+      { 
+      if (I1.score != I2.score)
+      return I1.score > I2.score; 
+      return I1.target->length() < I2.target->length();
+      });
 
   float MaxScore = !MatchResults.empty() ? MatchResults[0].score : 1.f;
   for(auto &R : MatchResults)
