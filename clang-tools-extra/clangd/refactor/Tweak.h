@@ -33,6 +33,7 @@
 namespace clang {
 namespace clangd {
 
+class ClangdServer;
 class FeatureModuleSet;
 
 /// An interface base for small context-sensitive refactoring actions.
@@ -49,7 +50,7 @@ public:
   struct Selection {
     Selection(const SymbolIndex *Index, ParsedAST &AST, unsigned RangeBegin,
               unsigned RangeEnd, SelectionTree ASTSelection,
-              llvm::vfs::FileSystem *VFS);
+              llvm::vfs::FileSystem *VFS, ClangdServer *Serv = nullptr);
     /// The text of the active document.
     llvm::StringRef Code;
     /// The Index for handling codebase related queries.
@@ -69,6 +70,7 @@ public:
     /// This is only populated when applying a tweak, not during prepare.
     llvm::vfs::FileSystem *FS = nullptr;
     // FIXME: provide a way to get sources and ASTs for other files.
+    ClangdServer *Server = nullptr;
   };
 
   struct Effect {
@@ -123,6 +125,26 @@ public:
   virtual llvm::StringLiteral kind() const = 0;
   /// Is this a 'hidden' tweak, which are off by default.
   virtual bool hidden() const { return false; }
+
+  struct MultiInvocation {
+    std::string Title;
+    std::string Param;
+  };
+
+  /// Returns true if this tweak may provide multiple actions to execute.
+  virtual bool supportsMultiple() const { return false; }
+
+  virtual std::vector<MultiInvocation>
+  getMultipleInvocations(const Selection &Sel) {
+    return {};
+  }
+
+  /// Run the second stage of a multi-invocation action.
+  /// EXPECTS: prepare() was called and returned true.
+  virtual Expected<Effect> applyMultiInvocation(const Selection &Sel,
+                                                const std::string &Param) {
+    return Effect{};
+  }
 };
 
 // All tweaks must be registered in the .cpp file next to their definition.

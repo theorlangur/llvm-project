@@ -18,6 +18,7 @@
 #include "ASTSignals.h"
 #include "Compiler.h"
 #include "Config.h"
+#include "PCHManager.h"
 #include "Protocol.h"
 #include "Quality.h"
 #include "index/Index.h"
@@ -304,13 +305,24 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
                                 const PreambleData *Preamble,
                                 const ParseInputs &ParseInput,
                                 CodeCompleteOptions Opts,
-                                SpeculativeFuzzyFind *SpecFuzzyFind = nullptr);
+                                SpeculativeFuzzyFind *SpecFuzzyFind = nullptr,
+                                PCHManager::PCHAccess PCH = {});
 
 /// Get signature help at a specified \p Pos in \p FileName.
 SignatureHelp signatureHelp(PathRef FileName, Position Pos,
-                            const PreambleData &Preamble,
+                            const PreambleData *Preamble,
                             const ParseInputs &ParseInput,
-                            MarkupKind DocumentationFormat);
+                            MarkupKind DocumentationFormat,
+                            PCHManager::PCHAccess PCH = {});
+
+inline SignatureHelp signatureHelp(PathRef FileName, Position Pos,
+                                   const PreambleData &Preamble,
+                                   const ParseInputs &ParseInput,
+                                   MarkupKind DocumentationFormat,
+                                   PCHManager::PCHAccess PCH = {}) {
+  return signatureHelp(FileName, Pos, &Preamble, ParseInput,
+                       DocumentationFormat, std::move(PCH));
+}
 
 // For index-based completion, we only consider:
 //   * symbols in namespaces or translation unit scopes (e.g. no class

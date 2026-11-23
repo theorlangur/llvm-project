@@ -163,6 +163,7 @@ public:
   /// Invokes a callback every time a diagnostics is completely formed. Handler
   /// of the callback can also mutate the diagnostic.
   void setDiagCallback(DiagCallback CB) { DiagCB = std::move(CB); }
+  const std::string &getModifiedASTFile() const { return ModifiedASTFile; }
 
 private:
   void flushLastDiag();
@@ -176,6 +177,7 @@ private:
   std::optional<FullSourceLoc> LastDiagLoc; // Valid only when LastDiag is set.
   bool LastDiagOriginallyError = false;     // Valid only when LastDiag is set.
   SourceManager *OrigSrcMgr = nullptr;
+  std::string ModifiedASTFile;
 
   llvm::DenseSet<std::pair<unsigned, unsigned>> IncludedErrorLocations;
 };

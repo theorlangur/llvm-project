@@ -46,12 +46,12 @@ namespace {
 SlabTuple indexSymbols(ASTContext &AST, Preprocessor &PP,
                        llvm::ArrayRef<Decl *> DeclsToIndex,
                        const MainFileMacros *MacroRefsToIndex,
-                       const include_cleaner::PragmaIncludes &PI,
+                       const include_cleaner::PragmaIncludes *PI,
                        bool IsIndexMainAST, llvm::StringRef Version,
                        bool CollectMainFileRefs, SymbolOrigin Origin) {
   SymbolCollector::Options CollectorOpts;
   CollectorOpts.CollectIncludePath = true;
-  CollectorOpts.PragmaIncludes = &PI;
+  CollectorOpts.PragmaIncludes = PI;
   CollectorOpts.CountReferences = false;
   CollectorOpts.Origin = Origin;
   CollectorOpts.CollectMainFileRefs = CollectMainFileRefs;
@@ -223,14 +223,14 @@ FileShardedIndex::getShard(llvm::StringRef Uri) const {
 SlabTuple indexMainDecls(ParsedAST &AST) {
   return indexSymbols(AST.getASTContext(), AST.getPreprocessor(),
                       AST.getLocalTopLevelDecls(), &AST.getMacros(),
-                      AST.getPragmaIncludes(),
+                      &AST.getPragmaIncludes(),
                       /*IsIndexMainAST=*/true, AST.version(),
                       /*CollectMainFileRefs=*/true, SymbolOrigin::Open);
 }
 
 SlabTuple indexHeaderSymbols(llvm::StringRef Version, ASTContext &AST,
                              Preprocessor &PP,
-                             const include_cleaner::PragmaIncludes &PI,
+                             const include_cleaner::PragmaIncludes *PI,
                              SymbolOrigin Origin) {
   std::vector<Decl *> DeclsToIndex(
       AST.getTranslationUnitDecl()->decls().begin(),

@@ -406,6 +406,108 @@ opt<PCHStorageFlag> PCHStorage{
     init(PCHStorageFlag::Disk),
 };
 
+opt<bool> UnityPCH{
+    "unity-pch",
+    cat(Features),
+    desc("Auto-discover unity translation units and hierarchical PCH headers "
+         "directly from compile_commands.json"),
+    init(true),
+};
+
+opt<std::string> UnityPCHConfig{
+    "unity-pch-config",
+    cat(Features),
+    desc("Optional path to unity_pch.json configuration override"),
+    init(""),
+};
+
+opt<bool> EnablePCH{
+    "pch",
+    cat(Features),
+    desc("Enable hierarchical static + dynamic PCH manager"),
+    init(true),
+};
+
+opt<bool> PCHInMemory{
+    "pch-in-memory",
+    cat(Features),
+    desc("Retain built static PCH buffers in memory"),
+    init(true),
+};
+
+opt<bool> PCHAlwaysWait{
+    "pch-wait-for-init",
+    cat(Features),
+    desc("Wait for initial PCH discovery/build before answering file "
+         "requests"),
+    init(true),
+};
+
+opt<unsigned> PCHThreads{
+    "pch-threads",
+    cat(Features),
+    desc("Max concurrent static PCH rebuild workers (0 = auto)"),
+    init(0),
+};
+
+opt<unsigned> MaxDynamicPCHs{
+    "pch-max-dynamic",
+    cat(Features),
+    desc("Maximum number of in-memory chained dynamic header PCHs to keep"),
+    init(24),
+};
+
+opt<bool> PCHDbgLog{
+    "pch-dbg-log",
+    cat(Features),
+    desc("Enable extended debug logging for PCHManager"),
+    init(false),
+};
+
+opt<std::string> ClangdCacheDirArg{
+    "cache-dir",
+    cat(Misc),
+    desc("Subdirectory name under .cache/ for clangd index and PCH cache "
+         "(default: clangd)"),
+    init("clangd"),
+};
+
+opt<bool> WorkspaceSymbolFuzzySW{
+    "workspace-symbol-fuzzy-sw",
+    cat(Features),
+    desc("Use Smith-Waterman fuzzy search for workspace/symbol"),
+    init(false),
+};
+
+opt<int> WorkspaceSymbolFuzzySWThreads{
+    "workspace-symbol-fuzzy-sw-threads",
+    cat(Features),
+    desc("Worker threads for Smith-Waterman workspace symbol search (0 = auto)"),
+    init(0),
+};
+
+opt<bool> WorkspaceSymbolVSCodeNameThenScope{
+    "workspace-symbol-vscode-name-only",
+    cat(Features),
+    desc("Match query against symbol name only unless '::' is present"),
+    init(false),
+};
+
+opt<bool> WorkspaceSymbolFirstSpaceSplitScopeName{
+    "workspace-symbol-first-space-split-scope-name",
+    cat(Features),
+    desc("Split query on first space into scope and name queries"),
+    init(true),
+};
+
+opt<bool> WorkspaceSymbolExtendedQueries{
+    "workspace-symbol-extended-queries",
+    cat(Features),
+    desc("Enable '!' (legacy search) and '?' (include outside workspace) "
+         "prefixes when --workspace-symbol-fuzzy-sw is enabled"),
+    init(true),
+};
+
 opt<bool> Sync{
     "sync",
     cat(Misc),
@@ -766,6 +868,8 @@ enum class ErrorResultCode : int {
   CheckFailed = 3
 };
 
+static const char *PCHVers = "PCH ver. 2.00";
+
 int clangdMain(int argc, char *argv[]) {
   // Clang could run on the main thread. e.g., when the flag '-check' or '-sync'
   // is enabled.
@@ -783,7 +887,8 @@ int clangdMain(int argc, char *argv[]) {
   llvm::cl::SetVersionPrinter([](llvm::raw_ostream &OS) {
     OS << versionString() << "\n"
        << "Features: " << featureString() << "\n"
-       << "Platform: " << platformString() << "\n";
+       << "Platform: " << platformString() << "\n"
+       << PCHVers << "\n";
   });
   const char *FlagsEnvVar = "CLANGD_FLAGS";
   const char *Overview =
@@ -901,6 +1006,7 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
   log("{0}", versionString());
   log("Features: {0}", featureString());
   log("PID: {0}", llvm::sys::Process::getProcessId());
+  log("{0}", PCHVers);
   {
     SmallString<128> CWD;
     if (auto Err = llvm::sys::fs::current_path(CWD))
@@ -1037,6 +1143,22 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
   Opts.SkipPreambleBuild = SkipPreambleBuild;
   Opts.ImportInsertions = ImportInsertions;
   Opts.QueryDriverGlobs = std::move(QueryDriverGlobs);
+  Opts.UnityPCH = UnityPCH;
+  Opts.UnityPCHConfig = UnityPCHConfig;
+  Opts.EnablePCH = EnablePCH;
+  Opts.StorePCHInMemory = PCHInMemory;
+  Opts.PCHAlwaysWait = PCHAlwaysWait;
+  Opts.PCHMaxConcurrency = PCHThreads;
+  Opts.MaxDynamicPCHs = MaxDynamicPCHs;
+  Opts.PCHDbgLog = PCHDbgLog;
+  Opts.ClangdCacheDir = ClangdCacheDirArg;
+  Opts.WorkspaceSymbolsFuzzySW = WorkspaceSymbolFuzzySW;
+  Opts.WorkspaceSymbolsFuzzySWThreads = WorkspaceSymbolFuzzySWThreads;
+  Opts.WorkspaceSymbolsVSCodeNameThenScope =
+      WorkspaceSymbolVSCodeNameThenScope;
+  Opts.WorkspaceSymbolsFirstSpaceSplitScopeName =
+      WorkspaceSymbolFirstSpaceSplitScopeName;
+  Opts.WorkspaceSymbolsExtendedQueries = WorkspaceSymbolExtendedQueries;
   Opts.TweakFilter = [&](const Tweak &T) {
     if (T.hidden() && !HiddenFeatures)
       return false;

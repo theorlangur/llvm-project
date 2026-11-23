@@ -98,6 +98,8 @@ add_clang_library(clangDaemon STATIC
   JSONTransport.cpp
   ModulesBuilder.cpp
   PathMapping.cpp
+  PCHManager.cpp
+  PCHManagerQueue.cpp
   ProjectModules.cpp
   Protocol.cpp
   Quality.cpp
@@ -112,8 +114,10 @@ add_clang_library(clangDaemon STATIC
   SystemIncludeExtractor.cpp
   TidyProvider.cpp
   TUScheduler.cpp
+  UnityProjectCDB.cpp
   URI.cpp
   XRefs.cpp
+  fuzzy_sw/fuzzy_sw_par.cpp
   ${COMPLETIONMODEL_SOURCES}
 
   index/Background.cpp

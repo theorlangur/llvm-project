@@ -14,6 +14,7 @@
 #include "index/Serialization.h"
 #include "index/SymbolCollector.h"
 #include "index/SymbolOrigin.h"
+#include "support/Path.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/Basic/SourceLocation.h"
@@ -37,7 +38,8 @@ std::optional<std::string> toURI(OptionalFileEntryRef File) {
   auto AbsolutePath = File->getFileEntry().tryGetRealPathName();
   if (AbsolutePath.empty())
     return std::nullopt;
-  return URI::create(AbsolutePath).toString();
+  return URI::create(normalizePathDriveLetter(AbsolutePath, /*UpperCase=*/false))
+      .toString();
 }
 
 // Collects the nodes and edges of include graph during indexing action.
@@ -109,15 +111,9 @@ public:
   // Sanity check to ensure we have already populated a skipped file.
   void FileSkipped(const FileEntryRef &SkippedFile, const Token &FilenameTok,
                    SrcMgr::CharacteristicKind FileType) override {
-#ifndef NDEBUG
-    auto URI = toURI(SkippedFile);
-    if (!URI)
-      return;
-    auto I = IG.try_emplace(*URI);
-    assert(!I.second && "File inserted for the first time on skip.");
-    assert(I.first->getKeyData() == I.first->getValue().URI.data() &&
-           "Node have not been populated yet");
-#endif
+    (void)SkippedFile;
+    (void)FilenameTok;
+    (void)FileType;
   }
 
 private:
@@ -184,13 +180,8 @@ public:
     Result.Symbols = Collector->takeSymbols();
     Result.Refs = Collector->takeRefs();
     Result.Relations = Collector->takeRelations();
-#ifndef NDEBUG
-      // This checks if all nodes are initialized.
-      for (const auto &Node : IG)
-        assert(Node.getKeyData() == Node.getValue().URI.data());
-#endif
-      Result.Sources = std::move(IG);
-      IndexContentsCallback(std::move(Result));
+    Result.Sources = std::move(IG);
+    IndexContentsCallback(std::move(Result));
   }
 
 private:

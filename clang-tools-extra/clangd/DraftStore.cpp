@@ -115,6 +115,11 @@ public:
 } // namespace
 
 llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> DraftStore::asVFS() const {
+  return asVFSInMem();
+}
+
+llvm::IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem>
+DraftStore::asVFSInMem() const {
   auto MemFS = llvm::makeIntrusiveRefCnt<llvm::vfs::InMemoryFileSystem>();
   std::lock_guard<std::mutex> Guard(Mutex);
   for (const auto &Draft : Drafts)

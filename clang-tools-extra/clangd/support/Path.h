@@ -44,6 +44,10 @@ bool pathStartsWith(
 /// Variant of parent_path that operates only on absolute paths.
 /// Unlike parent_path doesn't consider C: a parent of C:\.
 PathRef absoluteParent(PathRef Path);
+
+/// On Windows, normalizes a leading drive letter ("X:" -> "x:" or "X:").
+/// On other platforms, returns Path unchanged.
+std::string normalizePathDriveLetter(PathRef Path, bool UpperCase = false);
 } // namespace clangd
 } // namespace clang
 

@@ -53,6 +53,16 @@ public:
   size_t estimateMemoryUsage() const override {
     return Dynamic->estimateMemoryUsage() + Static->estimateMemoryUsage();
   }
+
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
+  uint64_t generation() const override {
+    uint64_t DG = Dynamic->generation();
+    uint64_t SG = Static->generation();
+    if (DG == 0 && SG == 0)
+      return 0;
+    return DG ^ (SG * 0x9e3779b97f4a7c15ULL + 0x9e3779b97f4a7c15ULL +
+                 (DG << 6) + (DG >> 2));
+  }
 };
 
 } // namespace clangd

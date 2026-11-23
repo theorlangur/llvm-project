@@ -125,7 +125,8 @@ std::string getDeclComment(const ASTContext &Ctx, const NamedDecl &Decl) {
 
     // Sanity check that the comment does not come from the PCH. We choose to
     // not write them into PCH, because they are racy and slow to load.
-    assert(!Ctx.getSourceManager().isLoadedSourceLocation(RC->getBeginLoc()));
+    if (Ctx.getSourceManager().isLoadedSourceLocation(RC->getBeginLoc()))
+      return "";
 
     std::string DeclDoc =
         RC->getFormattedText(Ctx.getSourceManager(), Ctx.getDiagnostics());
@@ -149,7 +150,8 @@ std::string getDeclComment(const ASTContext &Ctx, const NamedDecl &Decl) {
       return "";
     // Sanity check that the comment does not come from the PCH. We choose to
     // not write them into PCH, because they are racy and slow to load.
-    assert(!Ctx.getSourceManager().isLoadedSourceLocation(RC->getBeginLoc()));
+    if (Ctx.getSourceManager().isLoadedSourceLocation(RC->getBeginLoc()))
+      return "";
     Doc = RC->getFormattedText(Ctx.getSourceManager(), Ctx.getDiagnostics());
     if (!looksLikeDocComment(Doc))
       return "";

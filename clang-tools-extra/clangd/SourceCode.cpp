@@ -547,10 +547,10 @@ std::optional<std::string> getCanonicalPath(const FileEntryRef F,
     llvm::StringRef DirName = FileMgr.getCanonicalName(*Dir);
     llvm::sys::path::append(RealPath, DirName,
                             llvm::sys::path::filename(FilePath));
-    return RealPath.str().str();
+    return normalizePathDriveLetter(RealPath, /*UpperCase=*/false);
   }
 
-  return FilePath.str().str();
+  return normalizePathDriveLetter(FilePath, /*UpperCase=*/false);
 }
 
 TextEdit toTextEdit(const FixItHint &FixIt, const SourceManager &M,

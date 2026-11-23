@@ -713,6 +713,15 @@ void StoreDiags::HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
     return;
   }
 
+  if (Info.getID() == clang::diag::err_fe_ast_file_modified &&
+      Info.hasSourceManager() && Info.getNumArgs() > 0) {
+    auto &FM = Info.getSourceManager().getFileManager();
+    if (auto FE = FM.getOptionalFileRef(Info.getArgStdStr(0)))
+      ModifiedASTFile = std::string(FM.getCanonicalName(*FE));
+    else
+      ModifiedASTFile = Info.getArgStdStr(0);
+  }
+
   DiagnosticConsumer::HandleDiagnostic(DiagLevel, Info);
   bool OriginallyError =
       Info.getDiags()->getDiagnosticIDs()->isDefaultMappingAsError(

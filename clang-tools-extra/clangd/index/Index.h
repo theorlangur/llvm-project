@@ -16,6 +16,8 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/FunctionExtras.h"
 #include "llvm/Support/JSON.h"
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -197,6 +199,13 @@ public:
 
   /// Returns estimated size of index (in bytes).
   virtual size_t estimateMemoryUsage() const = 0;
+
+  virtual size_t collectAllSymbols(SymbolSimplifiedMap &Map) const {
+    return 0;
+  }
+  /// Monotonically increases whenever underlying index contents change, or 0
+  /// if unversioned.
+  virtual uint64_t generation() const { return 0; }
 };
 
 // Delegating implementation of SymbolIndex whose delegate can be swapped out.
@@ -232,10 +241,16 @@ public:
 
   size_t estimateMemoryUsage() const override;
 
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
+  uint64_t generation() const override {
+    return Generation.load(std::memory_order_relaxed);
+  }
+
 private:
   std::shared_ptr<SymbolIndex> snapshot() const;
   mutable std::mutex Mutex;
   std::shared_ptr<SymbolIndex> Index;
+  std::atomic<uint64_t> Generation{1};
 };
 
 } // namespace clangd

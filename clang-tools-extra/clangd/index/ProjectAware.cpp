@@ -59,6 +59,13 @@ public:
   llvm::unique_function<IndexContents(llvm::StringRef) const>
   indexedFiles() const override;
 
+  size_t collectAllSymbols(SymbolSimplifiedMap &Map) const override;
+  uint64_t generation() const override {
+    if (auto *Idx = getIndex())
+      return Idx->generation();
+    return 0;
+  }
+
   ProjectAwareIndex(IndexFactory Gen, bool Sync) : Gen(std::move(Gen)) {
     if (!Sync)
       Tasks = std::make_unique<AsyncTaskRunner>();
@@ -155,6 +162,12 @@ SymbolIndex *ProjectAwareIndex::getIndex() const {
   if (Entry.second)
     Entry.first->getSecond() = Gen(External, Tasks.get());
   return Entry.first->second.get();
+}
+
+size_t ProjectAwareIndex::collectAllSymbols(SymbolSimplifiedMap &Map) const {
+  if (auto *Idx = getIndex())
+    return Idx->collectAllSymbols(Map);
+  return 0;
 }
 } // namespace
 

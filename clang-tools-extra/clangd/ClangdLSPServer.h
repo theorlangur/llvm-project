@@ -31,6 +31,8 @@
 namespace clang {
 namespace clangd {
 
+class UnityProjectCDB;
+
 /// This class exposes ClangdServer's capabilities via Language Server Protocol.
 ///
 /// MessageHandler binds the implemented LSP methods (e.g. onInitialize) to
@@ -66,6 +68,11 @@ public:
 
     /// Flag to hint the experimental modules support is enabled.
     bool EnableExperimentalModulesSupport = false;
+
+    /// Wrap directory-based CDB with UnityProjectCDB to discover unity TUs and PCHs.
+    bool UnityPCH = true;
+    std::string UnityPCHConfig;
+    std::string ClangdCacheDir;
   };
 
   ClangdLSPServer(Transport &Transp, const ThreadsafeFS &TFS,
@@ -330,6 +337,7 @@ private:
   Options Opts;
   // The CDB is created by the "initialize" LSP method.
   std::unique_ptr<GlobalCompilationDatabase> BaseCDB;
+  UnityProjectCDB *UnityCDB = nullptr;
   // CDB is BaseCDB plus any commands overridden via LSP extensions.
   std::optional<OverlayCDB> CDB;
   // The ClangdServer is created by the "initialize" LSP method.

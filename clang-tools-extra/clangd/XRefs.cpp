@@ -1514,7 +1514,8 @@ ReferencesResult findReferences(ParsedAST &AST, Position Pos, uint32_t Limit,
                                 const SymbolIndex *Index, bool AddContext) {
   ReferencesResult Results;
   const SourceManager &SM = AST.getSourceManager();
-  auto MainFilePath = AST.tuPath();
+  std::string MainFileNorm = normalizePathDriveLetter(AST.tuPath(), /*UpperCase=*/false);
+  auto MainFilePath = llvm::StringRef(MainFileNorm);
   auto URIMainFile = URIForFile::canonicalize(MainFilePath, MainFilePath);
   auto CurLoc = sourceLocationInMainFile(SM, Pos);
   if (!CurLoc) {

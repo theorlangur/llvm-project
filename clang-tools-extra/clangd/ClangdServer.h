@@ -14,13 +14,16 @@
 #include "Diagnostics.h"
 #include "DraftStore.h"
 #include "FeatureModule.h"
+#include "FindSymbols.h"
 #include "GlobalCompilationDatabase.h"
 #include "Hover.h"
 #include "ModulesBuilder.h"
+#include "PCHManager.h"
 #include "Protocol.h"
 #include "SemanticHighlighting.h"
 #include "TUScheduler.h"
 #include "XRefs.h"
+#include "fuzzy_sw/fuzzy_sw.hpp"
 #include "index/Background.h"
 #include "index/FileIndex.h"
 #include "index/Index.h"
@@ -37,6 +40,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stack>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -202,6 +206,22 @@ public:
     /// regions in the document.
     bool PublishInactiveRegions = false;
 
+    /// Enable hierarchical static + dynamic PCH management for unity builds.
+    bool EnablePCH = false;
+    bool StorePCHInMemory = true;
+    bool PCHAlwaysWait = true;
+    unsigned PCHMaxConcurrency = 0;
+    size_t MaxDynamicPCHs = 24;
+    bool PCHDbgLog = false;
+    std::string ClangdCacheDir;
+
+    /// Workspace symbol Smith-Waterman fuzzy matcher options.
+    bool WorkspaceSymbolsFuzzySW = false;
+    bool WorkspaceSymbolsVSCodeNameThenScope = false;
+    bool WorkspaceSymbolsFirstSpaceSplitScopeName = false;
+    bool WorkspaceSymbolsExtendedQueries = true;
+    int WorkspaceSymbolsFuzzySWThreads = 0;
+
     explicit operator TUScheduler::Options() const;
   };
   // Sensible default options for use in tests.
@@ -237,7 +257,7 @@ public:
   void addDocument(PathRef File, StringRef Contents,
                    llvm::StringRef Version = "null",
                    WantDiagnostics WD = WantDiagnostics::Auto,
-                   bool ForceRebuild = false);
+                   bool ForceRebuild = false, bool AfterChange = false);
 
   /// Remove \p File from list of tracked files, schedule a request to free
   /// resources associated with it. Pending diagnostics for closed files may not
@@ -366,6 +386,7 @@ public:
     std::string ID;    /// ID to pass for applyTweak.
     std::string Title; /// A single-line message to show in the UI.
     llvm::StringLiteral Kind;
+    std::string Param; /// Optional parameter for multi-invocation tweaks.
   };
 
   // Ref to the clangd::Diag.
@@ -414,8 +435,15 @@ public:
                   Callback<CodeActionResult> CB);
 
   /// Apply the code tweak with a specified \p ID.
-  void applyTweak(PathRef File, Range Sel, StringRef ID,
+  void applyTweak(PathRef File, Range Sel, StringRef ID, StringRef Param,
                   Callback<Tweak::Effect> CB);
+  void applyTweak(PathRef File, Range Sel, StringRef ID,
+                  Callback<Tweak::Effect> CB) {
+    applyTweak(File, Sel, ID, "", std::move(CB));
+  }
+
+  void checkChangedFile(PathRef File);
+  std::optional<ParsedAST> buildAST(PathRef File, StringRef Contents);
 
   /// Called when an event occurs for a watched file in the workspace.
   void onFileEvent(const DidChangeWatchedFilesParams &Params);
@@ -519,6 +547,11 @@ private:
 
   bool PublishInactiveRegions = false;
 
+  bool WorkspaceSymbolsFuzzySW = false;
+  bool WorkspaceSymbolsVSCodeNameThenScope = false;
+  bool WorkspaceSymbolsFirstSpaceSplitScopeName = false;
+  bool WorkspaceSymbolsExtendedQueries = true;
+
   // GUARDED_BY(CachedCompletionFuzzyFindRequestMutex)
   llvm::StringMap<std::optional<FuzzyFindRequest>>
       CachedCompletionFuzzyFindRequestByFile;
@@ -526,6 +559,9 @@ private:
 
   std::optional<std::string> WorkspaceRoot;
   std::optional<AsyncTaskRunner> IndexTasks; // for stdlib indexing.
+  std::unique_ptr<ParsingCallbacks> OwnedCallbacks;
+  std::unique_ptr<PCHManager> PrecompiledHeaderMgr;
+  PCHManager::PCHBuiltEvent::Subscription PCHWasBuild;
   std::optional<TUScheduler> WorkScheduler;
   // Invalidation policy used for actions that we assume are "transient".
   TUScheduler::ASTActionInvalidation Transient;
@@ -536,6 +572,11 @@ private:
 
   std::unique_ptr<ThreadsafeFS> DirtyFS;
   std::function<Context(PathRef)> ContextProvider;
+
+  WorkspaceSymbolCache WSSymbolCache;
+  fuzzy_sw::SIMDParMatcher m_FuzzyMatchers[8];
+  std::mutex m_AvailableFuzzyMatchersLock;
+  std::stack<fuzzy_sw::SIMDParMatcher *> m_AvailableFuzzyMatchers;
 };
 
 } // namespace clangd

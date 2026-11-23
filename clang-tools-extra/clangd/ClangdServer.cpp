@@ -15,6 +15,7 @@
 #include "Format.h"
 #include "HeaderSourceSwitch.h"
 #include "InlayHints.h"
+#include "PCHManager.h"
 #include "ParsedAST.h"
 #include "Preamble.h"
 #include "Protocol.h"
@@ -24,6 +25,7 @@
 #include "TUScheduler.h"
 #include "XRefs.h"
 #include "clang-include-cleaner/Record.h"
+#include "index/Background.h"
 #include "index/FileIndex.h"
 #include "index/Merge.h"
 #include "index/StdLib.h"
@@ -42,6 +44,7 @@
 #include "clang/Tooling/Core/Replacement.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/Path.h"
@@ -173,6 +176,35 @@ private:
   bool CollectInactiveRegions;
 };
 
+struct ForwardingCallbacks : public ParsingCallbacks {
+  explicit ForwardingCallbacks(ParsingCallbacks &Target) : Target(Target) {}
+
+  void onPreambleAST(
+      PathRef Path, llvm::StringRef Version, CapturedASTCtx ASTCtx,
+      std::shared_ptr<const include_cleaner::PragmaIncludes> PI) override {
+    Target.onPreambleAST(Path, Version, std::move(ASTCtx), std::move(PI));
+  }
+
+  void onMainAST(PathRef Path, ParsedAST &AST, PublishFn Publish) override {
+    Target.onMainAST(Path, AST, Publish);
+  }
+
+  void onFailedAST(PathRef Path, llvm::StringRef Version,
+                   std::vector<Diag> Diags, PublishFn Publish) override {
+    Target.onFailedAST(Path, Version, std::move(Diags), Publish);
+  }
+
+  void onFileUpdated(PathRef File, const TUStatus &Status) override {
+    Target.onFileUpdated(File, Status);
+  }
+
+  void onPreamblePublished(PathRef File) override {
+    Target.onPreamblePublished(File);
+  }
+
+  ParsingCallbacks &Target;
+};
+
 class DraftStoreFS : public ThreadsafeFS {
 public:
   DraftStoreFS(const ThreadsafeFS &Base, const DraftStore &Drafts)
@@ -226,6 +258,12 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
       SkipPreambleBuild(Opts.SkipPreambleBuild),
       ImportInsertions(Opts.ImportInsertions),
       PublishInactiveRegions(Opts.PublishInactiveRegions),
+      WorkspaceSymbolsFuzzySW(Opts.WorkspaceSymbolsFuzzySW),
+      WorkspaceSymbolsVSCodeNameThenScope(
+          Opts.WorkspaceSymbolsVSCodeNameThenScope),
+      WorkspaceSymbolsFirstSpaceSplitScopeName(
+          Opts.WorkspaceSymbolsFirstSpaceSplitScopeName),
+      WorkspaceSymbolsExtendedQueries(Opts.WorkspaceSymbolsExtendedQueries),
       WorkspaceRoot(Opts.WorkspaceRoot),
       Transient(Opts.ImplicitCancellation ? TUScheduler::InvalidateOnUpdate
                                           : TUScheduler::NoInvalidation),
@@ -233,14 +271,63 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
       ContextProvider(Opts.ContextProvider) {
   if (Opts.AsyncThreadsCount != 0)
     IndexTasks.emplace();
+  OwnedCallbacks = std::make_unique<UpdateIndexCallbacks>(
+      DynamicIdx.get(), Callbacks, TFS, IndexTasks ? &*IndexTasks : nullptr,
+      PublishInactiveRegions);
+
+  if (Opts.EnablePCH) {
+    PCHManager::Options PCHOpts;
+    PCHOpts.StorePCHInMemory = Opts.StorePCHInMemory;
+    PCHOpts.WaitForInit = Opts.PCHAlwaysWait;
+    PCHOpts.WorkspaceRoot = Opts.WorkspaceRoot;
+    PCHOpts.ClangdCacheDir = Opts.ClangdCacheDir;
+    PCHOpts.MaxConcurrency = Opts.PCHMaxConcurrency;
+    PCHOpts.MaxDynamicPCHs = Opts.MaxDynamicPCHs;
+    PCHOpts.DbgLog = Opts.PCHDbgLog;
+    PCHOpts.OnProgress = [Callbacks](PCHManager::Stats S) {
+      if (Callbacks) {
+        BackgroundQueue::Stats T;
+        T.StatType = BackgroundQueue::Stats::Type::PCH;
+        T.Completed = S.Completed;
+        T.Enqueued = S.Total;
+        Callbacks->onBackgroundIndexProgress(T);
+      }
+    };
+    PrecompiledHeaderMgr =
+        std::make_unique<PCHManager>(CDB, TFS, *OwnedCallbacks, PCHOpts);
+    PCHWasBuild =
+        PrecompiledHeaderMgr->watch([this](const PCHManager::PCHEvent &E) {
+          vlog("PCH was built: {0}; Success: {1}", E.PCHPath, E.Success);
+          if (!E.Success)
+            return;
+          reparseOpenFilesIfNeeded([&](llvm::StringRef File) -> bool {
+            auto Cmd = this->CDB.getCompileCommand(File);
+            if (!Cmd)
+              return false;
+            return PrecompiledHeaderMgr->hasPCHInDependencies(File, *Cmd,
+                                                              E.PCHPath);
+          });
+        });
+  }
+
+  if (WorkspaceSymbolsFuzzySW) {
+    int Threads = Opts.WorkspaceSymbolsFuzzySWThreads != 0
+                      ? Opts.WorkspaceSymbolsFuzzySWThreads
+                      : (Opts.AsyncThreadsCount != 0 ? int(Opts.AsyncThreadsCount)
+                                                     : 2);
+    for (auto &FM : m_FuzzyMatchers) {
+      FM.SetupThreads(Threads);
+      m_AvailableFuzzyMatchers.push(&FM);
+    }
+  }
+
   // Pass a callback into `WorkScheduler` to extract symbols from a newly
   // parsed file and rebuild the file index synchronously each time an AST
   // is parsed.
-  WorkScheduler.emplace(CDB, TUScheduler::Options(Opts),
-                        std::make_unique<UpdateIndexCallbacks>(
-                            DynamicIdx.get(), Callbacks, TFS,
-                            IndexTasks ? &*IndexTasks : nullptr,
-                            PublishInactiveRegions));
+  WorkScheduler.emplace(
+      CDB, TUScheduler::Options(Opts),
+      std::make_unique<ForwardingCallbacks>(*OwnedCallbacks),
+      PrecompiledHeaderMgr.get());
   // Adds an index to the stack, at higher priority than existing indexes.
   auto AddIndex = [&](SymbolIndex *Idx) {
     if (this->Index != nullptr) {
@@ -265,7 +352,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
         TFS, CDB,
         BackgroundIndexStorage::createDiskBackedStorageFactory(
             [&CDB](llvm::StringRef File) { return CDB.getProjectInfo(File); }),
-        std::move(BGOpts));
+        std::move(BGOpts), PrecompiledHeaderMgr.get());
     AddIndex(BackgroundIdx.get());
   }
   if (DynamicIdx)
@@ -294,15 +381,79 @@ ClangdServer::~ClangdServer() {
     for (auto &Mod : *FeatureModules)
       Mod.blockUntilIdle(Deadline::infinity());
   }
+  BackgroundIdx.reset();
+  PCHWasBuild = {};
+  PrecompiledHeaderMgr.reset();
+}
+
+void ClangdServer::checkChangedFile(PathRef File) {
+  if (PrecompiledHeaderMgr)
+    PrecompiledHeaderMgr->checkChangedFile(File, DraftMgr.asVFS());
+}
+
+std::optional<ParsedAST> ClangdServer::buildAST(PathRef File,
+                                                llvm::StringRef Contents) {
+  class LocalStringBuffer : public llvm::MemoryBuffer {
+    const llvm::StringRef BufferContents;
+    const std::string Name;
+
+  public:
+    BufferKind getBufferKind() const override {
+      return MemoryBuffer::MemoryBuffer_Malloc;
+    }
+
+    llvm::StringRef getBufferIdentifier() const override { return Name; }
+
+    LocalStringBuffer(llvm::StringRef Data, llvm::StringRef Name)
+        : BufferContents(Data), Name(Name.str()) {
+      MemoryBuffer::init(BufferContents.begin(), BufferContents.end(),
+                         /*RequiresNullTerminator=*/true);
+    }
+  };
+
+  auto DraftVFS = DraftMgr.asVFSInMem();
+  DraftVFS->addFile(File, {}, std::make_unique<LocalStringBuffer>(Contents, File));
+  if (PrecompiledHeaderMgr)
+    PrecompiledHeaderMgr->tryAddDynamicPCH(File, DraftVFS);
+
+  ParseOptions Opts;
+  Opts.PreambleParseForwardingFunctions = PreambleParseForwardingFunctions;
+  Opts.ImportInsertions = ImportInsertions;
+
+  ParseInputs Inputs;
+  Inputs.TFS = &getHeaderFS();
+  Inputs.Contents = std::string(Contents);
+  Inputs.Version = "0";
+  Inputs.ForceRebuild = true;
+  Inputs.Opts = std::move(Opts);
+  Inputs.Index = Index;
+  Inputs.ClangTidyProvider = ClangTidyProvider;
+  Inputs.FeatureModules = FeatureModules;
+  Inputs.ModulesManager = ModulesManager;
+  Inputs.DraftFS = DraftVFS;
+  if (auto Cmd = CDB.getCompileCommand(File))
+    Inputs.CompileCommand = std::move(*Cmd);
+  else
+    Inputs.CompileCommand = CDB.getFallbackCommand(File);
+  return WorkScheduler->buildAST(File, std::move(Inputs));
 }
 
 void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                llvm::StringRef Version,
-                               WantDiagnostics WantDiags, bool ForceRebuild) {
+                               WantDiagnostics WantDiags, bool ForceRebuild,
+                               bool AfterChange) {
+  bool Existed = DraftMgr.getDraft(File).has_value();
   std::string ActualVersion = DraftMgr.addDraft(File, Version, Contents);
   ParseOptions Opts;
   Opts.PreambleParseForwardingFunctions = PreambleParseForwardingFunctions;
   Opts.ImportInsertions = ImportInsertions;
+
+  auto DraftVFS = DraftMgr.asVFS();
+  if (PrecompiledHeaderMgr) {
+    if (Existed && AfterChange)
+      PrecompiledHeaderMgr->checkChangedFile(File, DraftVFS);
+    PrecompiledHeaderMgr->tryAddDynamicPCH(File, DraftVFS);
+  }
 
   // Compile command is set asynchronously during update, as it can be slow.
   ParseInputs Inputs;
@@ -315,6 +466,7 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
   Inputs.ClangTidyProvider = ClangTidyProvider;
   Inputs.FeatureModules = FeatureModules;
   Inputs.ModulesManager = ModulesManager;
+  Inputs.DraftFS = DraftVFS;
   adjustParseInputs(Inputs, File);
   bool NewFile = WorkScheduler->update(File, Inputs, WantDiags);
   // If we loaded Foo.h, we want to make sure Foo.cpp is indexed.
@@ -418,6 +570,8 @@ ClangdServer::createConfiguredContextProvider(const config::Provider *Provider,
 
 void ClangdServer::removeDocument(PathRef File) {
   DraftMgr.removeDraft(File);
+  if (PrecompiledHeaderMgr)
+    PrecompiledHeaderMgr->tryRemoveDynamicPCH(File);
   WorkScheduler->remove(File);
 }
 
@@ -437,7 +591,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
       return CB(llvm::make_error<CancelledError>(Reason));
 
     std::optional<SpeculativeFuzzyFind> SpecFuzzyFind;
-    if (!IP->Preamble) {
+    if (!IP->Preamble && !IP->PCH) {
       // No speculation in Fallback mode, as it's supposed to be much faster
       // without compiling.
       vlog("Build for file {0} is not ready. Enter fallback mode.", File);
@@ -467,7 +621,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
     // both the old and the new version in case only one of them matches.
     CodeCompleteResult Result = clangd::codeComplete(
         File, Pos, IP->Preamble, ParseInput, CodeCompleteOpts,
-        SpecFuzzyFind ? &*SpecFuzzyFind : nullptr);
+        SpecFuzzyFind ? &*SpecFuzzyFind : nullptr, std::move(IP->PCH));
     // We don't want `codeComplete` to wait for the async call if it doesn't use
     // the result (e.g. non-index completion, speculation fails), so that `CB`
     // is called as soon as results are available.
@@ -508,7 +662,7 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
       return CB(IP.takeError());
 
     const auto *PreambleData = IP->Preamble;
-    if (!PreambleData)
+    if (!PreambleData && !IP->PCH)
       return CB(error("Failed to parse includes"));
 
     ParseInputs ParseInput{IP->Command, &getHeaderFS(), IP->Contents.str()};
@@ -517,8 +671,8 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
     if (!IP->Contents.ends_with("\n"))
       ParseInput.Contents.append("\n");
     ParseInput.Index = Index;
-    CB(clangd::signatureHelp(File, Pos, *PreambleData, ParseInput,
-                             DocumentationFormat));
+    CB(clangd::signatureHelp(File, Pos, PreambleData, ParseInput,
+                             DocumentationFormat, std::move(IP->PCH)));
   };
 
   // Unlike code completion, we wait for a preamble here.
@@ -654,7 +808,7 @@ namespace {
 // vector of pointers because GCC doesn't like non-copyable Selection.
 llvm::Expected<std::vector<std::unique_ptr<Tweak::Selection>>>
 tweakSelection(const Range &Sel, const InputsAndAST &AST,
-               llvm::vfs::FileSystem *FS) {
+               llvm::vfs::FileSystem *FS, ClangdServer *Serv) {
   auto Begin = positionToOffset(AST.Inputs.Contents, Sel.start);
   if (!Begin)
     return Begin.takeError();
@@ -666,7 +820,7 @@ tweakSelection(const Range &Sel, const InputsAndAST &AST,
       AST.AST.getASTContext(), AST.AST.getTokens(), *Begin, *End,
       [&](SelectionTree T) {
         Result.push_back(std::make_unique<Tweak::Selection>(
-            AST.Inputs.Index, AST.AST, *Begin, *End, std::move(T), FS));
+            AST.Inputs.Index, AST.AST, *Begin, *End, std::move(T), FS, Serv));
         return false;
       });
   assert(!Result.empty() && "Expected at least one SelectionTree");
@@ -697,8 +851,8 @@ tryConvertToRename(const Diag *Diag, const Fix &Fix) {
 void ClangdServer::codeAction(const CodeActionInputs &Params,
                               Callback<CodeActionResult> CB) {
   auto Action = [Params, CB = std::move(CB),
-                 FeatureModules(this->FeatureModules)](
-                    Expected<InputsAndAST> InpAST) mutable {
+                 FeatureModules(this->FeatureModules),
+                 Server = this](Expected<InputsAndAST> InpAST) mutable {
     if (!InpAST)
       return CB(InpAST.takeError());
     auto KindAllowed =
@@ -733,7 +887,8 @@ void ClangdServer::codeAction(const CodeActionInputs &Params,
     }
 
     // Collect Tweaks
-    auto Selections = tweakSelection(Params.Selection, *InpAST, /*FS=*/nullptr);
+    auto Selections =
+        tweakSelection(Params.Selection, *InpAST, /*FS=*/nullptr, Server);
     if (!Selections)
       return CB(Selections.takeError());
     // Don't allow a tweak to fire more than once across ambiguous selections.
@@ -744,7 +899,17 @@ void ClangdServer::codeAction(const CodeActionInputs &Params,
     };
     for (const auto &Sel : *Selections) {
       for (auto &T : prepareTweaks(*Sel, DeduplicatingFilter, FeatureModules)) {
-        Result.TweakRefs.push_back(TweakRef{T->id(), T->title(), T->kind()});
+        if (T->supportsMultiple()) {
+          auto MultiInvocations = T->getMultipleInvocations(*Sel);
+          if (MultiInvocations.empty())
+            continue;
+          for (auto &[Title, Param] : MultiInvocations)
+            Result.TweakRefs.push_back(
+                TweakRef{T->id(), std::move(Title), T->kind(), std::move(Param)});
+        } else {
+          Result.TweakRefs.push_back(
+              TweakRef{T->id(), T->title(), T->kind(), std::string()});
+        }
         PreparedTweaks.insert(T->id());
         TweakAvailable.record(1, T->id());
       }
@@ -757,7 +922,7 @@ void ClangdServer::codeAction(const CodeActionInputs &Params,
 }
 
 void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID,
-                              Callback<Tweak::Effect> CB) {
+                              StringRef Param, Callback<Tweak::Effect> CB) {
   // Tracks number of times a tweak has been attempted.
   static constexpr trace::Metric TweakAttempt(
       "tweak_attempt", trace::Metric::Counter, "tweak_id");
@@ -766,12 +931,12 @@ void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID,
       "tweak_failed", trace::Metric::Counter, "tweak_id");
   TweakAttempt.record(1, TweakID);
   auto Action = [File = File.str(), Sel, TweakID = TweakID.str(),
-                 CB = std::move(CB),
+                 Param = Param.str(), CB = std::move(CB),
                  this](Expected<InputsAndAST> InpAST) mutable {
     if (!InpAST)
       return CB(InpAST.takeError());
     auto FS = DirtyFS->view(std::nullopt);
-    auto Selections = tweakSelection(Sel, *InpAST, FS.get());
+    auto Selections = tweakSelection(Sel, *InpAST, FS.get(), this);
     if (!Selections)
       return CB(Selections.takeError());
     std::optional<llvm::Expected<Tweak::Effect>> Effect;
@@ -780,7 +945,10 @@ void ClangdServer::applyTweak(PathRef File, Range Sel, StringRef TweakID,
     for (const auto &Selection : *Selections) {
       auto T = prepareTweak(TweakID, *Selection, FeatureModules);
       if (T) {
-        Effect = (*T)->apply(*Selection);
+        if ((*T)->supportsMultiple())
+          Effect = (*T)->applyMultiInvocation(*Selection, Param);
+        else
+          Effect = (*T)->apply(*Selection);
         break;
       }
       Effect = T.takeError();
@@ -942,8 +1110,11 @@ void ClangdServer::outgoingCalls(
 }
 
 void ClangdServer::onFileEvent(const DidChangeWatchedFilesParams &Params) {
-  // FIXME: Do nothing for now. This will be used for indexing and potentially
-  // invalidating other caches.
+  if (PrecompiledHeaderMgr) {
+    auto FS = TFS.view(std::nullopt);
+    for (const auto &Change : Params.changes)
+      PrecompiledHeaderMgr->checkChangedFile(Change.uri.file(), FS);
+  }
 }
 
 void ClangdServer::workspaceSymbols(
@@ -952,8 +1123,45 @@ void ClangdServer::workspaceSymbols(
   WorkScheduler->run(
       "getWorkspaceSymbols", /*Path=*/"",
       [Query = Query.str(), Limit, CB = std::move(CB), this]() mutable {
-        CB(clangd::getWorkspaceSymbols(Query, Limit, Index,
-                                       WorkspaceRoot.value_or("")));
+        if (!WorkspaceSymbolsFuzzySW) {
+          CB(clangd::getWorkspaceSymbols(Query, Limit, Index,
+                                         WorkspaceRoot.value_or("")));
+          return;
+        }
+        fuzzy_sw::SIMDParMatcher *PFM = nullptr;
+        {
+          std::lock_guard<std::mutex> G(m_AvailableFuzzyMatchersLock);
+          if (!m_AvailableFuzzyMatchers.empty()) {
+            PFM = m_AvailableFuzzyMatchers.top();
+            m_AvailableFuzzyMatchers.pop();
+          }
+        }
+        llvm::scope_exit OnExit([&] {
+          if (PFM) {
+            std::lock_guard<std::mutex> G(m_AvailableFuzzyMatchersLock);
+            m_AvailableFuzzyMatchers.push(PFM);
+          }
+        });
+        if (PFM) {
+          WorkspaceSymbolOptions Opts;
+          Opts.VSCode_NameThenScope = WorkspaceSymbolsVSCodeNameThenScope;
+          Opts.FirstSpaceSplitScopeName =
+              WorkspaceSymbolsFirstSpaceSplitScopeName;
+          Opts.ExtendedQueries = WorkspaceSymbolsExtendedQueries;
+          CB(clangd::getWorkspaceSymbolsV2(Query, Limit, Index,
+                                           WorkspaceRoot.value_or(""), *PFM,
+                                           Opts, &WSSymbolCache));
+        } else {
+          fuzzy_sw::SIMDParMatcher FallbackMatcher;
+          WorkspaceSymbolOptions Opts;
+          Opts.VSCode_NameThenScope = WorkspaceSymbolsVSCodeNameThenScope;
+          Opts.FirstSpaceSplitScopeName =
+              WorkspaceSymbolsFirstSpaceSplitScopeName;
+          Opts.ExtendedQueries = WorkspaceSymbolsExtendedQueries;
+          CB(clangd::getWorkspaceSymbolsV2(Query, Limit, Index,
+                                           WorkspaceRoot.value_or(""),
+                                           FallbackMatcher, Opts, &WSSymbolCache));
+        }
       });
 }
 

@@ -14,6 +14,7 @@
 #include "SourceCode.h"
 #include "index/Index.h"
 #include "support/Logger.h"
+#include "support/Path.h"
 #include "clang/AST/DeclFriend.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/Index/IndexSymbol.h"
@@ -21,6 +22,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include <algorithm>
+#include <cstring>
 #include <limits>
 #include <optional>
 
@@ -312,14 +315,25 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
   TopN<ScoredSymbolInfo, ScoredSymbolGreater> Top(
       Req.Limit.value_or(std::numeric_limits<size_t>::max()));
   FuzzyMatcher Filter(Req.Query);
+  FuzzyMatcher ScopeFilter(Names.first);
 
   Index->fuzzyFind(Req, [HintPath, &Top, &Filter, AnyScope = Req.AnyScope,
-                         ReqScope = Names.first](const Symbol &Sym) {
+                         ReqScope = Names.first, &ScopeFilter](const Symbol &Sym) {
     llvm::StringRef Scope = Sym.Scope;
     // Fuzzyfind might return symbols from irrelevant namespaces if query was
     // not fully-qualified, drop those.
-    if (AnyScope && !approximateScopeMatch(Scope, ReqScope))
-      return;
+    float ScopeFactor = 1.f;
+    if (AnyScope) {
+      if (!ReqScope.empty()) {
+        auto M = ScopeFilter.match(Scope);
+        if (!M || *M < 0.5f) {
+          if (!approximateScopeMatch(Scope, ReqScope))
+            return;
+        } else {
+          ScopeFactor = *M;
+        }
+      }
+    }
 
     auto Loc = symbolToLocation(Sym, HintPath);
     if (!Loc) {
@@ -359,10 +373,312 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
     Info.score = Relevance.NameMatch > std::numeric_limits<float>::epsilon()
                      ? Score / Relevance.NameMatch
                      : QualScore;
+    if (Info.score)
+      Info.score = (*Info.score) * ScopeFactor;
     Top.push({Score, std::move(Info)});
   });
   for (auto &R : std::move(Top).items())
     Result.push_back(std::move(R.second));
+  return Result;
+}
+
+namespace {
+
+struct CachedSymbolCharSrc : fuzzy_sw::CharSource {
+  const WorkspaceSymbolCache::CachedSymbol *Sym = nullptr;
+
+  CachedSymbolCharSrc() = default;
+  explicit CachedSymbolCharSrc(const WorkspaceSymbolCache::CachedSymbol *S)
+      : Sym(S) {}
+
+  size_t length() const override {
+    return Sym->Scope.size() + Sym->Name.size();
+  }
+
+  size_t read(char *PDest, size_t Off, size_t N) const override {
+    size_t ScopeSize = Sym->Scope.size();
+    size_t NameSize = Sym->Name.size();
+    if (Off >= ScopeSize + NameSize)
+      return 0;
+
+    size_t Res = 0;
+    size_t T = N;
+    if (Off < ScopeSize) {
+      if (Off + T > ScopeSize)
+        T = ScopeSize - Off;
+      std::memcpy(PDest, Sym->Scope.data() + Off, T);
+      N -= T;
+      if (!N)
+        return T;
+      Off += T;
+      PDest += T;
+      Res += T;
+    }
+
+    Off -= ScopeSize;
+    T = N;
+    if (Off + T > NameSize)
+      T = NameSize - Off;
+    std::memcpy(PDest, Sym->Name.data() + Off, T);
+    return Res + T;
+  }
+};
+
+struct CachedSymbolNameCharSrc final : CachedSymbolCharSrc {
+  using CachedSymbolCharSrc::CachedSymbolCharSrc;
+
+  size_t length() const override { return Sym->Name.size(); }
+
+  size_t read(char *PDest, size_t Off, size_t N) const override {
+    size_t NameSize = Sym->Name.size();
+    if (Off >= NameSize)
+      return 0;
+    size_t T = std::min(N, NameSize - Off);
+    std::memcpy(PDest, Sym->Name.data() + Off, T);
+    return T;
+  }
+};
+
+struct CachedSymbolScopeCharSrc final : CachedSymbolCharSrc {
+  using CachedSymbolCharSrc::CachedSymbolCharSrc;
+
+  size_t length() const override { return Sym->Scope.size(); }
+
+  size_t read(char *PDest, size_t Off, size_t N) const override {
+    size_t ScopeSize = Sym->Scope.size();
+    if (Off >= ScopeSize)
+      return 0;
+    size_t T = std::min(N, ScopeSize - Off);
+    std::memcpy(PDest, Sym->Scope.data() + Off, T);
+    return T;
+  }
+};
+
+llvm::Expected<Location> symbolToLocationV2(const SymbolSimplified &Sym,
+                                            llvm::StringRef TUPath) {
+  return indexToLSPLocation(
+      Sym.Definition ? Sym.Definition : Sym.CanonicalDeclaration, TUPath);
+}
+
+std::shared_ptr<const WorkspaceSymbolCache::Snapshot>
+buildWorkspaceSymbolSnapshot(const SymbolIndex *Index,
+                             llvm::StringRef HintPath) {
+  SymbolSimplifiedMap AllSymbols;
+  Index->collectAllSymbols(AllSymbols);
+
+  std::string NormHint = normalizePathDriveLetter(HintPath, /*UpperCase=*/false);
+  auto Snap = std::make_shared<WorkspaceSymbolCache::Snapshot>();
+  Snap->Symbols.reserve(AllSymbols.size());
+
+  for (const auto &Entry : AllSymbols) {
+    const SymbolSimplified &S = Entry.second;
+    auto Loc = symbolToLocationV2(S, HintPath);
+    if (!Loc) {
+      log("Workspace symbols: {0}", Loc.takeError());
+      continue;
+    }
+    WorkspaceSymbolCache::CachedSymbol CS;
+    CS.Name = S.Name.str();
+    CS.Scope = S.Scope.str();
+    CS.TemplateSpecializationArgs = S.TemplateSpecializationArgs.str();
+    CS.SymInfo = S.SymInfo;
+    CS.Loc = std::move(*Loc);
+    std::string FileNorm =
+        normalizePathDriveLetter(CS.Loc.uri.file(), /*UpperCase=*/false);
+    CS.InWorkspace = NormHint.empty() || llvm::StringRef(FileNorm).starts_with(NormHint);
+    Snap->Symbols.push_back(std::move(CS));
+  }
+  return Snap;
+}
+
+} // namespace
+
+void WorkspaceSymbolCache::invalidate() {
+  std::lock_guard<std::mutex> Lock(Mu);
+  Current.reset();
+  LastIndex = nullptr;
+  LastGeneration = 0;
+  LastHintPath.clear();
+}
+
+std::shared_ptr<const WorkspaceSymbolCache::Snapshot>
+WorkspaceSymbolCache::getOrRebuild(const SymbolIndex *Index,
+                                   llvm::StringRef HintPath) {
+  if (!Index)
+    return nullptr;
+  uint64_t Gen = Index->generation();
+  std::string NormHint = normalizePathDriveLetter(HintPath, /*UpperCase=*/false);
+
+  if (Gen != 0) {
+    std::lock_guard<std::mutex> Lock(Mu);
+    if (Current && LastIndex == Index && LastGeneration == Gen &&
+        LastHintPath == NormHint)
+      return Current;
+  }
+
+  auto NewSnap = buildWorkspaceSymbolSnapshot(Index, HintPath);
+  if (Gen != 0) {
+    std::lock_guard<std::mutex> Lock(Mu);
+    LastIndex = Index;
+    LastGeneration = Gen;
+    LastHintPath = std::move(NormHint);
+    Current = NewSnap;
+  }
+  return NewSnap;
+}
+
+llvm::Expected<std::vector<SymbolInformation>> getWorkspaceSymbolsV2(
+    llvm::StringRef Query, int Limit, const SymbolIndex *const Index,
+    llvm::StringRef HintPath, fuzzy_sw::SIMDParMatcher &SW,
+    WorkspaceSymbolOptions Opts, WorkspaceSymbolCache *Cache) {
+  std::vector<SymbolInformation> Result;
+  if (!Index || Query.empty())
+    return Result;
+
+  if (Opts.ExtendedQueries && Query.starts_with('!'))
+    return getWorkspaceSymbols(Query.drop_front(), Limit, Index, HintPath);
+
+  bool IncludeSymbolsOutsideWorkspace = false;
+  if (Opts.ExtendedQueries && Query.starts_with('?')) {
+    Query = Query.drop_front();
+    IncludeSymbolsOutsideWorkspace = true;
+  }
+  if (Query.empty())
+    return Result;
+
+  enum class Mode { ScopeWithName, NameOnly, ScopeThenName };
+  Mode M = Mode::ScopeWithName;
+  llvm::StringRef ScopeQuery, NameQuery;
+
+  if (Opts.VSCode_NameThenScope) {
+    if (Query.find("::") == llvm::StringRef::npos) {
+      M = Mode::NameOnly;
+      NameQuery = Query;
+    }
+  } else if (Opts.FirstSpaceSplitScopeName) {
+    if (auto Pos = Query.find(' '); Pos != llvm::StringRef::npos) {
+      if (Pos == 0) {
+        M = Mode::NameOnly;
+        NameQuery = Query.drop_front();
+      } else {
+        M = Mode::ScopeThenName;
+        ScopeQuery = Query.take_front(Pos);
+        NameQuery = Query.drop_front(Pos + 1);
+      }
+    }
+  }
+
+  std::shared_ptr<const WorkspaceSymbolCache::Snapshot> Snap =
+      Cache ? Cache->getOrRebuild(Index, HintPath)
+            : buildWorkspaceSymbolSnapshot(Index, HintPath);
+  if (!Snap)
+    return Result;
+
+  const size_t N = Snap->Symbols.size();
+  std::vector<CachedSymbolCharSrc> SymbolsCharSrc;
+  std::vector<CachedSymbolNameCharSrc> SymbolsOnlyNameCharSrc;
+  std::vector<CachedSymbolScopeCharSrc> SymbolsOnlyScopeCharSrc;
+  std::vector<fuzzy_sw::CharSource *> TargetCharSrc;
+  std::vector<fuzzy_sw::CharSource *> TargetOnlyNameCharSrc;
+  std::vector<fuzzy_sw::CharSource *> TargetOnlyScopeCharSrc;
+  if (M == Mode::ScopeWithName) {
+    SymbolsCharSrc.reserve(N);
+    TargetCharSrc.reserve(N);
+  } else {
+    if (M == Mode::ScopeThenName) {
+      SymbolsOnlyScopeCharSrc.reserve(N);
+      TargetOnlyScopeCharSrc.reserve(N);
+    }
+    SymbolsOnlyNameCharSrc.reserve(N);
+    TargetOnlyNameCharSrc.reserve(N);
+  }
+
+  for (const auto &S : Snap->Symbols) {
+    if (!IncludeSymbolsOutsideWorkspace && !S.InWorkspace)
+      continue;
+    if (M == Mode::ScopeWithName) {
+      auto &Cs = SymbolsCharSrc.emplace_back(&S);
+      TargetCharSrc.push_back(&Cs);
+    } else {
+      if (M == Mode::ScopeThenName) {
+        auto &Cs = SymbolsOnlyScopeCharSrc.emplace_back(&S);
+        TargetOnlyScopeCharSrc.push_back(&Cs);
+      }
+      auto &Cs = SymbolsOnlyNameCharSrc.emplace_back(&S);
+      TargetOnlyNameCharSrc.push_back(&Cs);
+    }
+  }
+
+  fuzzy_sw::SIMDParMatcher::CharSourceResult MatchResults;
+  if (M == Mode::ScopeWithName) {
+    int MaxPossibleScore = int(Query.size()) * 3;
+    MatchResults = SW.match_par(Query, std::move(TargetCharSrc),
+                                {MaxPossibleScore / 2, false});
+  } else {
+    int MaxPossibleScoreName = int(NameQuery.size()) * 3;
+    auto TMatchResults =
+        SW.match_par(NameQuery, std::move(TargetOnlyNameCharSrc),
+                     {MaxPossibleScoreName / 3, false});
+    struct Item {
+      fuzzy_sw::CharSource *PSrc = nullptr;
+      int Score = 0;
+    };
+    llvm::DenseMap<const WorkspaceSymbolCache::CachedSymbol *, Item>
+        MergedSymbolScores;
+    for (const auto &[PSrc, Score] : TMatchResults) {
+      auto *SCs = static_cast<CachedSymbolCharSrc *>(PSrc);
+      MergedSymbolScores[SCs->Sym] = {PSrc, Score};
+    }
+
+    if (M == Mode::ScopeThenName) {
+      int MaxPossibleScoreScope = int(ScopeQuery.size()) * 3;
+      TMatchResults =
+          SW.match_par(ScopeQuery, std::move(TargetOnlyScopeCharSrc),
+                       {MaxPossibleScoreScope / 3, false});
+      for (const auto &[PSrc, Score] : TMatchResults) {
+        const auto *Id = static_cast<CachedSymbolCharSrc *>(PSrc)->Sym;
+        if (auto It = MergedSymbolScores.find(Id);
+            It != MergedSymbolScores.end())
+          It->second.Score += Score;
+        else
+          MergedSymbolScores[Id] = {PSrc, Score};
+      }
+    }
+
+    MatchResults.reserve(MergedSymbolScores.size());
+    for (const auto &Entry : MergedSymbolScores)
+      MatchResults.emplace_back(Entry.second.PSrc, Entry.second.Score);
+  }
+
+  std::sort(MatchResults.begin(), MatchResults.end(),
+            [](const auto &I1, const auto &I2) {
+              if (I1.score != I2.score)
+                return I1.score > I2.score;
+              return I1.target->length() < I2.target->length();
+            });
+
+  float MaxScore =
+      (!MatchResults.empty() && MatchResults[0].score > 0)
+          ? float(MatchResults[0].score)
+          : 1.f;
+  for (const auto &R : MatchResults) {
+    const auto *PSrc = static_cast<const CachedSymbolCharSrc *>(R.target);
+    const auto *Sym = PSrc->Sym;
+
+    SymbolInformation Info;
+    Info.name = Sym->Name + Sym->TemplateSpecializationArgs;
+    Info.kind = indexSymbolKindToSymbolKind(Sym->SymInfo);
+    Info.location = Sym->Loc;
+    llvm::StringRef Scope = Sym->Scope;
+    Scope.consume_back("::");
+    Info.containerName = Scope.str();
+    Info.score = float(R.score) / MaxScore;
+    Result.push_back(std::move(Info));
+
+    if (Limit > 0 && Result.size() >= static_cast<size_t>(Limit))
+      break;
+  }
+
   return Result;
 }
 

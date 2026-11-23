@@ -66,6 +66,8 @@ BackgroundIndexLoader::loadShard(PathRef StartSourceFile, PathRef DependentTU) {
 
   LS.Shard = std::move(Shard);
   for (const auto &It : *LS.Shard->Sources) {
+    if (It.getKey().empty())
+      continue;
     auto AbsPath = URI::resolve(It.getKey(), StartSourceFile);
     if (!AbsPath) {
       elog("Failed to resolve URI: {0}", AbsPath.takeError());

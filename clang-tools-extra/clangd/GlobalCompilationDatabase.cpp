@@ -456,6 +456,7 @@ DirectoryBasedGlobalCompilationDatabase::lookupCDB(
   CDBLookupResult Result;
   Result.CDB = std::move(CDB);
   Result.PI.SourceRoot = DirCache->Path;
+  Result.PI.ClangdCacheDir = Opts.ClangdCacheDir;
 
   if (ShouldBroadcast)
     broadcastCDB(Result);
@@ -862,14 +863,25 @@ OverlayCDB::getProjectModules(PathRef File) const {
   return MDB;
 }
 
+std::optional<PCHSpec> OverlayCDB::getPCHSpec(PathRef File) const {
+  auto Spec = DelegatingCDB::getPCHSpec(File);
+  if (Spec && Mangler)
+    Mangler(Spec->BuildCommand, Spec->BuildCommand.Filename);
+  return Spec;
+}
+
 DelegatingCDB::DelegatingCDB(
     const GlobalCompilationDatabase *Base,
     std::optional<std::string> FallbackWorkingDirectory)
     : GlobalCompilationDatabase(FallbackWorkingDirectory), Base(Base) {
-  if (Base)
+  if (Base) {
     BaseChanged = Base->watch([this](const std::vector<std::string> Changes) {
       OnCommandChanged.broadcast(Changes);
     });
+    BasePCHAnnounce = Base->watch([this](const std::vector<PCHSpec> Specs) {
+      OnPCHAnnounce.broadcast(Specs);
+    });
+  }
 }
 
 DelegatingCDB::DelegatingCDB(
@@ -909,6 +921,12 @@ bool DelegatingCDB::blockUntilIdle(Deadline D) const {
   if (!Base)
     return true;
   return Base->blockUntilIdle(D);
+}
+
+std::optional<PCHSpec> DelegatingCDB::getPCHSpec(PathRef File) const {
+  if (!Base)
+    return std::nullopt;
+  return Base->getPCHSpec(File);
 }
 
 } // namespace clangd

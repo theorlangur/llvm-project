@@ -443,8 +443,10 @@ private:
     if (!FE || FE->getName().empty())
       return "";
 
-    if (auto Verbatim = PI->getPublic(*FE); !Verbatim.empty())
-      return Verbatim;
+    if (PI) {
+      if (auto Verbatim = PI->getPublic(*FE); !Verbatim.empty())
+        return Verbatim;
+    }
 
     llvm::StringRef Filename = FE->getName();
     if (auto Canonical = mapCanonical(Filename); !Canonical.empty())
@@ -626,6 +628,10 @@ bool SymbolCollector::handleDeclOccurrence(
   }
   const NamedDecl *ND = dyn_cast<NamedDecl>(D);
   if (!ND)
+    return true;
+  if (Opts.Origin == SymbolOrigin::Preamble &&
+      ASTCtx->getLangOpts().CompilingPCH &&
+      ASTCtx->getSourceManager().isLoadedSourceLocation(D->getLocation()))
     return true;
 
   auto ID = getSymbolIDCached(ND);

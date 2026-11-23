@@ -8,6 +8,7 @@
 
 #include "support/Path.h"
 #include "llvm/Support/Path.h"
+#include <cctype>
 namespace clang {
 namespace clangd {
 
@@ -48,6 +49,23 @@ bool pathStartsWith(PathRef Ancestor, PathRef Path,
   // Then make sure either two paths are equal or Path has a separator
   // afterwards.
   return Path.empty() || llvm::sys::path::is_separator(Path.front(), Style);
+}
+
+std::string normalizePathDriveLetter(PathRef Path, bool UpperCase) {
+  std::string Result = Path.str();
+#if defined(_WIN32)
+  if (Result.size() >= 2 && Result[1] == ':' &&
+      ((Result[0] >= 'a' && Result[0] <= 'z') ||
+       (Result[0] >= 'A' && Result[0] <= 'Z'))) {
+    Result[0] = UpperCase ? static_cast<char>(std::toupper(
+                                static_cast<unsigned char>(Result[0])))
+                          : static_cast<char>(std::tolower(
+                                static_cast<unsigned char>(Result[0])));
+  }
+#else
+  (void)UpperCase;
+#endif
+  return Result;
 }
 } // namespace clangd
 } // namespace clang

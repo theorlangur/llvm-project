@@ -104,6 +104,7 @@ add_unittest(ClangdUnitTests ClangdTests
   ThreadCrashReporterTests.cpp
   TidyProviderTests.cpp
   TypeHierarchyTests.cpp
+  UnityPCHTests.cpp
   URITests.cpp
   XRefsTests.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/DecisionForestRuntimeTest.cpp

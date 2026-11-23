@@ -47,6 +47,7 @@ struct InputsAndPreamble {
   const PreambleData *Preamble;
   // This can be nullptr if no ASTSignals are available.
   const ASTSignals *Signals;
+  PCHManager::PCHAccess PCH;
 };
 
 /// Determines whether diagnostics should be generated for a file snapshot.
@@ -239,7 +240,8 @@ public:
   };
 
   TUScheduler(const GlobalCompilationDatabase &CDB, const Options &Opts,
-              std::unique_ptr<ParsingCallbacks> ASTCallbacks = nullptr);
+              std::unique_ptr<ParsingCallbacks> ASTCallbacks = nullptr,
+              const PCHManager *PCHMgr = nullptr);
   ~TUScheduler();
 
   TUScheduler(const TUScheduler &other) = delete;
@@ -338,6 +340,8 @@ public:
   /// Mostly useful for synchronizing tests.
   bool blockUntilIdle(Deadline D) const;
 
+  std::optional<ParsedAST> buildAST(PathRef File, ParseInputs Inputs);
+
 private:
   /// This class stores per-file data in the Files map.
   struct FileData;
@@ -366,6 +370,7 @@ private:
   const GlobalCompilationDatabase &CDB;
   Options Opts;
   std::unique_ptr<ParsingCallbacks> Callbacks; // not nullptr
+  const PCHManager *PCHMgr = nullptr;
   Semaphore Barrier;
   Semaphore QuickRunBarrier;
   llvm::StringMap<std::unique_ptr<FileData>> Files;

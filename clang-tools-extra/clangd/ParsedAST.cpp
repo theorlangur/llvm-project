@@ -65,6 +65,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include <cassert>
 #include <cstddef>
 #include <iterator>
@@ -427,12 +428,19 @@ std::optional<ParsedAST>
 ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
                  std::unique_ptr<clang::CompilerInvocation> CI,
                  llvm::ArrayRef<Diag> CompilerInvocationDiags,
-                 std::shared_ptr<const PreambleData> Preamble) {
+                 std::shared_ptr<const PreambleData> Preamble,
+                 PCHManager::PCHAccess *PCH) {
   trace::Span Tracer("BuildAST");
   SPAN_ATTACH(Tracer, "File", Filename);
   const Config &Cfg = Config::current();
 
   auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
+  if (Inputs.DraftFS) {
+    auto Overlay =
+        llvm::makeIntrusiveRefCnt<llvm::vfs::OverlayFileSystem>(std::move(VFS));
+    Overlay->pushOverlay(Inputs.DraftFS);
+    VFS = std::move(Overlay);
+  }
   if (Preamble && Preamble->StatCache)
     VFS = Preamble->StatCache->getConsumingFS(std::move(VFS));
 
@@ -449,6 +457,10 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   // Command-line parsing sets DisableFree to true by default, but we don't want
   // to leak memory in clangd.
   CI->getFrontendOpts().DisableFree = false;
+  if (PCH && *PCH) {
+    Preamble = nullptr;
+    PCH->addPCH(CI.get(), VFS);
+  }
   const PrecompiledPreamble *PreamblePCH =
       Preamble ? &Preamble->Preamble : nullptr;
 
@@ -761,6 +773,9 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   Clang->getDiagnostics().setClient(new IgnoreDiagnostics);
   // CompilerInstance won't run this callback, do it directly.
   ASTDiags.EndSourceFile();
+  if (PCH && *PCH && !ASTDiags.getModifiedASTFile().empty())
+    PCH->getManager()->checkChangedFile(ASTDiags.getModifiedASTFile(), VFS,
+                                        /*Force=*/true);
 
   std::vector<Diag> Diags = CompilerInvocationDiags;
   // FIXME: Also skip generation of diagnostics altogether to speed up ast
@@ -777,6 +792,8 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
                    std::move(Clang), std::move(Action), std::move(Tokens),
                    std::move(Macros), std::move(Marks), std::move(ParsedDecls),
                    std::move(Diags), std::move(Includes), std::move(PI));
+  if (PCH && *PCH)
+    Result.PCHAccessLifetime = std::move(*PCH);
   llvm::move(getIncludeCleanerDiags(Result, Inputs.Contents, *Inputs.TFS),
              std::back_inserter(Result.Diags));
   return std::move(Result);

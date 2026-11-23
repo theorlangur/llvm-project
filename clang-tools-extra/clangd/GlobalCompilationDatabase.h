@@ -30,6 +30,17 @@ struct ProjectInfo {
   // The directory in which the compilation database was discovered.
   // Empty if directory-based compilation database discovery was not used.
   std::string SourceRoot;
+  std::string ClangdCacheDir;
+};
+
+/// Describes a static or dynamic precompiled header managed by PCHManager.
+struct PCHSpec {
+  std::string PCHHeader;        // Static: stdafx.hpp path; Dynamic: target header
+  std::string ParentPCHHeader;  // Parent level stdafx.hpp (empty for Level 1)
+  std::string UmbrellaHeader;   // Dynamic only: level stdafx.hpp to preprocess
+  std::string StopBeforeHeader; // Dynamic only: header where PPSkipIncludes stops
+  tooling::CompileCommand BuildCommand;
+  bool IsDynamic = false;
 };
 
 /// Provides compilation arguments used for parsing C and C++ files.
@@ -71,9 +82,21 @@ public:
     return OnCommandChanged.observe(std::move(L));
   }
 
+  /// Returns an optional PCH specification associated with \p File (either a
+  /// static PCH for a unity TU or a dynamic PCH for a header inside stdafx).
+  virtual std::optional<PCHSpec> getPCHSpec(PathRef File) const {
+    return std::nullopt;
+  }
+
+  using PCHAnnounce = Event<std::vector<PCHSpec>>;
+  PCHAnnounce::Subscription watch(PCHAnnounce::Listener L) const {
+    return OnPCHAnnounce.observe(std::move(L));
+  }
+
 protected:
   std::optional<std::string> FallbackWorkingDirectory;
   mutable CommandChanged OnCommandChanged;
+  mutable PCHAnnounce OnPCHAnnounce;
 };
 
 // Helper class for implementing GlobalCompilationDatabases that wrap others.
@@ -98,10 +121,13 @@ public:
 
   bool blockUntilIdle(Deadline D) const override;
 
+  std::optional<PCHSpec> getPCHSpec(PathRef File) const override;
+
 private:
   const GlobalCompilationDatabase *Base;
   std::unique_ptr<GlobalCompilationDatabase> BaseOwner;
   CommandChanged::Subscription BaseChanged;
+  PCHAnnounce::Subscription BasePCHAnnounce;
 };
 
 /// Gets compile args from tooling::CompilationDatabases built for parent
@@ -128,6 +154,7 @@ public:
     // Working directory for fallback commands
     // If unset, parent directory of file should be used
     std::optional<std::string> FallbackWorkingDirectory;
+    std::string ClangdCacheDir;
 
     void applyFallbackWorkingDirectory(
         std::optional<std::string> FallbackWorkingDirectory);
@@ -227,6 +254,8 @@ public:
 
   std::unique_ptr<ProjectModules>
   getProjectModules(PathRef File) const override;
+
+  std::optional<PCHSpec> getPCHSpec(PathRef File) const override;
 
 private:
   mutable std::mutex Mutex;

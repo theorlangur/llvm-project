@@ -36,6 +36,8 @@
 namespace clang {
 namespace clangd {
 
+class PCHManager;
+
 // Handles storage and retrieval of index shards. Both store and load
 // operations can be called from multiple-threads concurrently.
 class BackgroundIndexStorage {
@@ -88,6 +90,7 @@ public:
     unsigned Active = 0;    // Tasks being currently processed by a worker.
     unsigned Completed = 0; // Tasks that have been finished.
     unsigned LastIdle = 0;  // Number of completed tasks when last empty.
+    enum class Type { Back, PCH } StatType = Type::Back;
   };
 
   BackgroundQueue(std::function<void(Stats)> OnProgress = nullptr)
@@ -154,7 +157,7 @@ public:
   /// The current Context will be propagated to each worker thread.
   BackgroundIndex(const ThreadsafeFS &, const GlobalCompilationDatabase &CDB,
                   BackgroundIndexStorage::Factory IndexStorageFactory,
-                  Options Opts);
+                  Options Opts, const PCHManager *PCHMgr = nullptr);
   ~BackgroundIndex(); // Blocks while the current task finishes.
 
   // Enqueue translation units for indexing.
@@ -226,6 +229,7 @@ private:
   };
   BackgroundQueue Queue;
   AsyncTaskRunner ThreadPool;
+  const PCHManager *PCHMgr = nullptr;
   GlobalCompilationDatabase::CommandChanged::Subscription CommandsChanged;
 };
 

@@ -13,9 +13,15 @@
 #define LLVM_CLANG_TOOLS_EXTRA_CLANGD_FINDSYMBOLS_H
 
 #include "Protocol.h"
+#include "fuzzy_sw/fuzzy_sw.hpp"
 #include "index/Symbol.h"
 #include "clang/AST/Decl.h"
 #include "llvm/ADT/StringRef.h"
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 namespace clang {
 namespace clangd {
@@ -56,6 +62,46 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
 /// Retrieves the symbols contained in the "main file" section of an AST in the
 /// same order that they appear.
 llvm::Expected<std::vector<DocumentSymbol>> getDocumentSymbols(ParsedAST &AST);
+
+struct WorkspaceSymbolOptions {
+  bool VSCode_NameThenScope = false;
+  bool FirstSpaceSplitScopeName = false;
+  /// First char '!' forwards to getWorkspaceSymbols; '?' includes outside-workspace symbols.
+  bool ExtendedQueries = true;
+};
+
+/// Thread-safe generation-keyed snapshot cache of workspace symbols owning its
+/// own string storage so searches hold no dangling references across index swaps.
+class WorkspaceSymbolCache {
+public:
+  struct CachedSymbol {
+    std::string Name;
+    std::string Scope;
+    std::string TemplateSpecializationArgs;
+    index::SymbolInfo SymInfo;
+    Location Loc;
+    bool InWorkspace = false;
+  };
+  struct Snapshot {
+    std::vector<CachedSymbol> Symbols;
+  };
+
+  std::shared_ptr<const Snapshot> getOrRebuild(const SymbolIndex *Index,
+                                               llvm::StringRef HintPath);
+  void invalidate();
+
+private:
+  std::mutex Mu;
+  const SymbolIndex *LastIndex = nullptr;
+  uint64_t LastGeneration = 0;
+  std::string LastHintPath;
+  std::shared_ptr<const Snapshot> Current;
+};
+
+llvm::Expected<std::vector<SymbolInformation>> getWorkspaceSymbolsV2(
+    llvm::StringRef Query, int Limit, const SymbolIndex *const Index,
+    llvm::StringRef HintPath, fuzzy_sw::SIMDParMatcher &SW,
+    WorkspaceSymbolOptions Opts, WorkspaceSymbolCache *Cache = nullptr);
 
 /// Converts a single SymbolTag to a bitmask.
 SymbolTags toSymbolTagBitmask(SymbolTag ST);

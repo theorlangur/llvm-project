@@ -154,6 +154,7 @@ public:
 
   // Return all transitively reachable files.
   llvm::ArrayRef<std::string> allHeaders() const { return RealPathNames; }
+  std::vector<std::string> takeAllHeaders() { return std::move(RealPathNames); }
 
   // Returns includes inside the main file with the given spelling.
   // Spelling should include brackets or quotes, e.g. <foo>.

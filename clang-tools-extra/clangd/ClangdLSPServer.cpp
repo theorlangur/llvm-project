@@ -20,6 +20,7 @@
 #include "SourceCode.h"
 #include "TUScheduler.h"
 #include "URI.h"
+#include "UnityProjectCDB.h"
 #include "refactor/Tweak.h"
 #include "support/Cancellation.h"
 #include "support/Context.h"
@@ -111,6 +112,7 @@ CodeAction toCodeAction(const ClangdServer::TweakRef &T, const URIForFile &File,
   Args.file = File;
   Args.tweakID = T.ID;
   Args.selection = Selection;
+  Args.param = T.Param;
   CA.command->argument = std::move(Args);
   return CA;
 }
@@ -552,10 +554,20 @@ void ClangdLSPServer::onInitialize(const InitializeParams &Params,
     if (const auto &Dir = Params.initializationOptions.compilationDatabasePath)
       CDBOpts.CompileCommandsDir = Dir;
     CDBOpts.ContextProvider = Opts.ContextProvider;
+    CDBOpts.ClangdCacheDir = Opts.ClangdCacheDir;
     if (Opts.StrongWorkspaceMode)
       CDBOpts.applyFallbackWorkingDirectory(Opts.WorkspaceRoot);
     BaseCDB =
         std::make_unique<DirectoryBasedGlobalCompilationDatabase>(CDBOpts);
+    if (Opts.UnityPCH) {
+      UnityProjectCDB::Options UOpts;
+      if (!Opts.UnityPCHConfig.empty())
+        UOpts.ConfigPath = Opts.UnityPCHConfig;
+      auto U = std::make_unique<UnityProjectCDB>(std::move(BaseCDB), TFS,
+                                                 std::move(UOpts));
+      UnityCDB = U.get();
+      BaseCDB = std::move(U);
+    }
   }
   auto Mangler = CommandMangler::detect();
   Mangler.SystemIncludeExtractor =
@@ -761,15 +773,23 @@ void ClangdLSPServer::onDocumentDidChange(
     }
   }
   Server->addDocument(File, NewCode, encodeVersion(Params.textDocument.version),
-                      WantDiags, Params.forceRebuild);
+                      WantDiags, Params.forceRebuild, /*AfterChange=*/true);
 }
 
 void ClangdLSPServer::onDocumentDidSave(
     const DidSaveTextDocumentParams &Params) {
+  PathRef File = Params.textDocument.uri.file();
+  if (UnityCDB)
+    UnityCDB->notifyFileChanged(File);
+  Server->checkChangedFile(File);
   Server->reparseOpenFilesIfNeeded([](llvm::StringRef) { return true; });
 }
 
 void ClangdLSPServer::onFileEvent(const DidChangeWatchedFilesParams &Params) {
+  if (UnityCDB) {
+    for (const auto &Change : Params.changes)
+      UnityCDB->notifyFileChanged(Change.uri.file());
+  }
   // We could also reparse all open files here. However:
   //  - this could be frequent, and revalidating all the preambles isn't free
   //  - this is useful e.g. when switching git branches, but we're likely to see
@@ -837,7 +857,7 @@ void ClangdLSPServer::onCommandApplyTweak(const TweakArgs &Args,
     // ApplyEdit will take care of calling Reply().
     return applyEdit(std::move(WE), "Tweak applied.", std::move(Reply));
   };
-  Server->applyTweak(Args.file.file(), Args.selection, Args.tweakID,
+  Server->applyTweak(Args.file.file(), Args.selection, Args.tweakID, Args.param,
                      std::move(Action));
 }
 
@@ -1876,9 +1896,11 @@ void ClangdLSPServer::onBackgroundIndexProgress(
       WorkDoneProgressReport Report;
       Report.percentage = 100 * (Stats.Completed - Stats.LastIdle) /
                           (Stats.Enqueued - Stats.LastIdle);
-      Report.message =
-          llvm::formatv("{0}/{1}", Stats.Completed - Stats.LastIdle,
-                        Stats.Enqueued - Stats.LastIdle);
+      const char *Prefix =
+          Stats.StatType == BackgroundQueue::Stats::Type::PCH ? "PCH " : "";
+      Report.message = llvm::formatv("{2}{0}/{1}",
+                                     Stats.Completed - Stats.LastIdle,
+                                     Stats.Enqueued - Stats.LastIdle, Prefix);
       ReportWorkDoneProgress({ProgressToken, std::move(Report)});
     } else {
       assert(Stats.Completed == Stats.Enqueued);

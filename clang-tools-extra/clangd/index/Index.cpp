@@ -20,6 +20,7 @@ void SwapIndex::reset(std::unique_ptr<SymbolIndex> Index) {
     std::lock_guard<std::mutex> Lock(Mutex);
     Pin = std::move(this->Index);
     this->Index = std::move(Index);
+    Generation.fetch_add(1, std::memory_order_relaxed);
   }
 }
 std::shared_ptr<SymbolIndex> SwapIndex::snapshot() const {
@@ -96,6 +97,10 @@ SwapIndex::indexedFiles() const {
 
 size_t SwapIndex::estimateMemoryUsage() const {
   return snapshot()->estimateMemoryUsage();
+}
+
+size_t SwapIndex::collectAllSymbols(SymbolSimplifiedMap &Map) const {
+  return snapshot()->collectAllSymbols(Map);
 }
 
 } // namespace clangd

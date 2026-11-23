@@ -152,6 +152,8 @@ struct PreambleBuildStats {
   size_t SerializedSize;
 };
 
+class PCHManager;
+
 /// Build a preamble for the new inputs unless an old one can be reused.
 /// If \p PreambleCallback is set, it will be run on top of the AST while
 /// building the preamble.
@@ -160,6 +162,7 @@ std::shared_ptr<const PreambleData>
 buildPreamble(PathRef FileName, CompilerInvocation CI,
               const ParseInputs &Inputs, bool StoreInMemory,
               PreambleParsedCallback PreambleCallback,
+              const PCHManager *PCHMgr = nullptr,
               PreambleBuildStats *Stats = nullptr);
 
 /// Returns true if \p Preamble is reusable for \p Inputs. Note that it will

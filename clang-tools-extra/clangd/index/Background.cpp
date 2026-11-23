@@ -10,6 +10,7 @@
 #include "Compiler.h"
 #include "Config.h"
 #include "Headers.h"
+#include "PCHManager.h"
 #include "SourceCode.h"
 #include "URI.h"
 #include "index/BackgroundIndexLoader.h"
@@ -92,14 +93,15 @@ bool shardIsStale(const LoadedShard &LS, llvm::vfs::FileSystem *FS) {
 
 BackgroundIndex::BackgroundIndex(
     const ThreadsafeFS &TFS, const GlobalCompilationDatabase &CDB,
-    BackgroundIndexStorage::Factory IndexStorageFactory, Options Opts)
+    BackgroundIndexStorage::Factory IndexStorageFactory, Options Opts,
+    const PCHManager *PCHMgr)
     : SwapIndex(std::make_unique<MemIndex>()), TFS(TFS), CDB(CDB),
       IndexingPriority(Opts.IndexingPriority),
       ContextProvider(std::move(Opts.ContextProvider)),
       IndexedSymbols(IndexContents::All, Opts.SupportContainedRefs),
       Rebuilder(this, &IndexedSymbols, Opts.ThreadPoolSize),
       IndexStorageFactory(std::move(IndexStorageFactory)),
-      Queue(std::move(Opts.OnProgress)),
+      Queue(std::move(Opts.OnProgress)), PCHMgr(PCHMgr),
       CommandsChanged(
           CDB.watch([&](const std::vector<std::string> &ChangedFiles) {
             enqueue(ChangedFiles);
@@ -193,6 +195,8 @@ void BackgroundIndex::update(
   // since we don't even know what absolute path they should fall in.
   for (const auto &IndexIt : *Index.Sources) {
     const auto &IGN = IndexIt.getValue();
+    if (IGN.URI.empty())
+      continue;
     auto AbsPath = URI::resolve(IGN.URI, MainFile);
     if (!AbsPath) {
       elog("Failed to resolve URI: {0}", AbsPath.takeError());
@@ -274,10 +278,15 @@ llvm::Error BackgroundIndex::index(tooling::CompileCommand Cmd) {
   ParseInputs Inputs;
   Inputs.TFS = &TFS;
   Inputs.CompileCommand = std::move(Cmd);
+  PCHManager::PCHAccess PCH =
+      PCHMgr ? PCHMgr->findPCH(AbsolutePath, Inputs.CompileCommand)
+             : PCHManager::PCHAccess{};
   IgnoreDiagnostics IgnoreDiags;
   auto CI = buildCompilerInvocation(Inputs, IgnoreDiags);
   if (!CI)
     return error("Couldn't build compiler invocation");
+  if (PCH)
+    PCH.addPCH(CI.get(), FS);
 
   auto Clang =
       prepareCompilerInstance(std::move(CI), /*Preamble=*/nullptr,

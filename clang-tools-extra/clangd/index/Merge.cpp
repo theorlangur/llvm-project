@@ -322,5 +322,9 @@ Symbol mergeSymbol(const Symbol &L, const Symbol &R) {
   return S;
 }
 
+size_t MergedIndex::collectAllSymbols(SymbolSimplifiedMap &Map) const {
+  return Dynamic->collectAllSymbols(Map) + Static->collectAllSymbols(Map);
+}
+
 } // namespace clangd
 } // namespace clang

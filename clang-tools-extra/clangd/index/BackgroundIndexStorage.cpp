@@ -121,7 +121,9 @@ public:
     llvm::SmallString<128> StorageDir(FallbackDir);
     if (auto PI = GetProjectInfo(File)) {
       StorageDir = PI->SourceRoot;
-      llvm::sys::path::append(StorageDir, ".cache", "clangd", "index");
+      llvm::StringRef CacheDir =
+          PI->ClangdCacheDir.empty() ? "clangd" : llvm::StringRef(PI->ClangdCacheDir);
+      llvm::sys::path::append(StorageDir, ".cache", CacheDir, "index");
     }
     auto &IndexStorage = IndexStorageMap[StorageDir];
     if (!IndexStorage)

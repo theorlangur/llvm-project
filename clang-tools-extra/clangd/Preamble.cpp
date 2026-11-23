@@ -15,6 +15,7 @@
 #include "FS.h"
 #include "FeatureModule.h"
 #include "Headers.h"
+#include "PCHManager.h"
 #include "Protocol.h"
 #include "SourceCode.h"
 #include "clang-include-cleaner/Record.h"
@@ -573,7 +574,7 @@ std::shared_ptr<const PreambleData>
 buildPreamble(PathRef FileName, CompilerInvocation CI,
               const ParseInputs &Inputs, bool StoreInMemory,
               PreambleParsedCallback PreambleCallback,
-              PreambleBuildStats *Stats) {
+              const PCHManager *PCHMgr, PreambleBuildStats *Stats) {
   // Note that we don't need to copy the input contents, preamble can live
   // without those.
   auto ContentsBuffer =
@@ -630,6 +631,12 @@ buildPreamble(PathRef FileName, CompilerInvocation CI,
       });
   llvm::SmallString<32> AbsFileName(FileName);
   VFS->makeAbsolute(AbsFileName);
+  PCHManager::PCHAccess PCH;
+  if (PCHMgr) {
+    PCH = PCHMgr->findPCH(FileName, Inputs.CompileCommand);
+    if (PCH)
+      PCH.addPCH(&CI, VFS);
+  }
   auto StatCache = std::make_shared<PreambleFileStatusCache>(AbsFileName);
   auto StatCacheFS = StatCache->getProducingFS(VFS);
   llvm::IntrusiveRefCntPtr<TimerFS> TimedFS(new TimerFS(StatCacheFS));
