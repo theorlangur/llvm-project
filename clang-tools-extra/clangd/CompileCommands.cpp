@@ -205,6 +205,109 @@ static std::string resolveDriver(llvm::StringRef Driver, bool FollowSymlink,
   return Driver.str();
 }
 
+llvm::StringRef unwrapClangPassthrough(llvm::StringRef Arg) {
+  if (Arg.consume_front("/clang:") || Arg.consume_front("-clang:"))
+    return Arg;
+  return {};
+}
+
+bool isStripPCHSingleCC1Flag(llvm::StringRef Arg) {
+  return Arg.starts_with("-include-pch=") || Arg == "-emit-pch" ||
+         Arg == "-building-pch-with-obj" || Arg == "-verify-pch" ||
+         Arg == "-relocatable-pch" || Arg == "--relocatable-pch" ||
+         Arg == "-fno-validate-pch" || Arg == "-Winvalid-pch" ||
+         Arg == "-fpch-instantiate-templates" ||
+         Arg == "-fno-pch-instantiate-templates" ||
+         Arg.starts_with("-pch-through-");
+}
+
+// Strips pre-existing build-system PCH flags (-include-pch, -emit-pch,
+// -building-pch-with-obj, clang-cl /Yu /Yc /Fp, etc.) so clangd's driver
+// invocation and PCHManager never fail on or load external build .pch files.
+void stripBuildSystemPCHFlags(std::vector<std::string> &Cmd, bool IsCLMode) {
+  if (Cmd.size() <= 1)
+    return;
+  std::vector<std::string> Clean;
+  Clean.reserve(Cmd.size());
+  Clean.push_back(std::move(Cmd[0]));
+
+  for (size_t I = 1; I < Cmd.size(); ++I) {
+    llvm::StringRef S = Cmd[I];
+    if (S == "--") {
+      for (size_t J = I; J < Cmd.size(); ++J)
+        Clean.push_back(std::move(Cmd[J]));
+      break;
+    }
+
+    // 4-token: -Xclang (-include-pch | -pch-through-header) -Xclang <val>
+    if (S == "-Xclang" && I + 3 < Cmd.size() && Cmd[I + 2] == "-Xclang" &&
+        (Cmd[I + 1] == "-include-pch" || Cmd[I + 1] == "-pch-through-header")) {
+      I += 3;
+      continue;
+    }
+    // 2-token: -Xclang <cc1-pch-flag>
+    if (S == "-Xclang" && I + 1 < Cmd.size() &&
+        isStripPCHSingleCC1Flag(Cmd[I + 1])) {
+      ++I;
+      continue;
+    }
+
+    // /clang:... and -clang:... pass-through forms (clang-cl).
+    llvm::StringRef Pass0 = unwrapClangPassthrough(S);
+    if (!Pass0.empty()) {
+      if (Pass0 == "-Xclang" && I + 3 < Cmd.size()) {
+        llvm::StringRef Pass1 = unwrapClangPassthrough(Cmd[I + 1]);
+        llvm::StringRef Pass2 = unwrapClangPassthrough(Cmd[I + 2]);
+        llvm::StringRef Pass3 = unwrapClangPassthrough(Cmd[I + 3]);
+        if ((Pass1 == "-include-pch" || Pass1 == "-pch-through-header") &&
+            Pass2 == "-Xclang" && !Pass3.empty()) {
+          I += 3;
+          continue;
+        }
+      }
+      if ((Pass0 == "-Xclang" && I + 1 < Cmd.size() &&
+           isStripPCHSingleCC1Flag(unwrapClangPassthrough(Cmd[I + 1]))) ||
+          ((Pass0 == "-include-pch" || Pass0 == "-pch-through-header") &&
+           I + 1 < Cmd.size() && !unwrapClangPassthrough(Cmd[I + 1]).empty())) {
+        ++I;
+        continue;
+      }
+      if (isStripPCHSingleCC1Flag(Pass0))
+        continue;
+    }
+
+    // Direct 2-token: -include-pch <val> or -pch-through-header <val>
+    if ((S == "-include-pch" || S == "-pch-through-header") &&
+        I + 1 < Cmd.size() && Cmd[I + 1] != "--") {
+      ++I;
+      continue;
+    }
+    // Direct 1-token GCC/Clang PCH flags.
+    if (S == "-include-pch" || S == "-fpch-preprocess" ||
+        S == "-fno-pch-preprocess" || S == "-fpch-codegen" ||
+        S == "-fpch-debuginfo" || isStripPCHSingleCC1Flag(S)) {
+      continue;
+    }
+
+    // CL-compatible /Yc, /Yu, /Fp, /Fp: flags.
+    if (IsCLMode) {
+      if ((S == "/Fp:" || S == "-Fp:") && I + 1 < Cmd.size() &&
+          Cmd[I + 1] != "--") {
+        ++I;
+        continue;
+      }
+      if (S.starts_with("/Yc") || S.starts_with("-Yc") ||
+          S.starts_with("/Yu") || S.starts_with("-Yu") ||
+          S.starts_with("/Fp") || S.starts_with("-Fp")) {
+        continue;
+      }
+    }
+
+    Clean.push_back(std::move(Cmd[I]));
+  }
+  Cmd = std::move(Clean);
+}
+
 } // namespace
 
 CommandMangler CommandMangler::detect() {
@@ -226,6 +329,16 @@ void CommandMangler::operator()(tooling::CompileCommand &Command,
   // a Cmd missing the driver is probably rare enough in practice and erroneous.
   if (Cmd.empty())
     return;
+
+  {
+    llvm::SmallVector<const char *, 16> PreScanArgs;
+    PreScanArgs.reserve(Cmd.size());
+    for (size_t I = 1; I < Cmd.size(); ++I)
+      PreScanArgs.push_back(Cmd[I].c_str());
+    bool PreIsCLMode = driver::IsClangCL(
+        driver::getDriverMode(Cmd[0].c_str(), PreScanArgs));
+    stripBuildSystemPCHFlags(Cmd, PreIsCLMode);
+  }
 
   auto &OptTable = getDriverOptTable();
   // OriginalArgs needs to outlive ArgList.

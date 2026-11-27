@@ -70,6 +70,8 @@ extractIncludeDirs(const tooling::CompileCommand &Cmd) {
   std::vector<std::string> Dirs;
   for (size_t I = 0; I < Cmd.CommandLine.size(); ++I) {
     StringRef Arg = Cmd.CommandLine[I];
+    if (Arg == "--")
+      break;
     if ((Arg == "-I" || Arg == "/I" || Arg == "-isystem") &&
         I + 1 < Cmd.CommandLine.size()) {
       Dirs.push_back(resolveRelativeTo(Cmd.Directory, Cmd.CommandLine[++I]));
@@ -84,11 +86,314 @@ extractIncludeDirs(const tooling::CompileCommand &Cmd) {
   return Dirs;
 }
 
-// Strips output/compile-target/input-file arguments from a unity compile command
-// so it can serve as a clean base command for headers, PCHs, and .cpp files.
-tooling::CompileCommand
-stripTargetAndOutputArgs(const tooling::CompileCommand &Orig,
-                         PathRef OrigFileNorm, bool ClangCL) {
+StringRef unwrapClangArg(StringRef Arg) {
+  if (Arg.consume_front("/clang:") || Arg.consume_front("-clang:"))
+    return Arg;
+  return {};
+}
+
+bool isPCHSingleCC1Flag(StringRef Arg) {
+  return Arg.starts_with("-include-pch=") || Arg == "-emit-pch" ||
+         Arg == "-building-pch-with-obj" || Arg == "-verify-pch" ||
+         Arg == "-relocatable-pch" || Arg == "--relocatable-pch" ||
+         Arg == "-fno-validate-pch" || Arg == "-Winvalid-pch" ||
+         Arg == "-fpch-instantiate-templates" ||
+         Arg == "-fno-pch-instantiate-templates" ||
+         Arg.starts_with("-pch-through-");
+}
+
+// Skips one build-system PCH option starting at index \p I (advancing \p I if
+// multiple tokens were consumed). Returns true if skipped.
+bool skipBuildSystemPCHArg(llvm::ArrayRef<std::string> Args, size_t &I,
+                           bool ClangCL) {
+  StringRef S = Args[I];
+
+  // 4-token: -Xclang (-include-pch | -pch-through-header) -Xclang <val>
+  if (S == "-Xclang" && I + 3 < Args.size() && Args[I + 2] == "-Xclang" &&
+      (Args[I + 1] == "-include-pch" || Args[I + 1] == "-pch-through-header")) {
+    I += 3;
+    return true;
+  }
+  // 2-token: -Xclang <cc1-pch-flag>
+  if (S == "-Xclang" && I + 1 < Args.size() &&
+      isPCHSingleCC1Flag(Args[I + 1])) {
+    ++I;
+    return true;
+  }
+
+  // /clang:... and -clang:... pass-through forms.
+  StringRef Pass0 = unwrapClangArg(S);
+  if (!Pass0.empty()) {
+    if (Pass0 == "-Xclang" && I + 3 < Args.size()) {
+      StringRef Pass1 = unwrapClangArg(Args[I + 1]);
+      StringRef Pass2 = unwrapClangArg(Args[I + 2]);
+      StringRef Pass3 = unwrapClangArg(Args[I + 3]);
+      if ((Pass1 == "-include-pch" || Pass1 == "-pch-through-header") &&
+          Pass2 == "-Xclang" && !Pass3.empty()) {
+        I += 3;
+        return true;
+      }
+    }
+    if ((Pass0 == "-Xclang" && I + 1 < Args.size() &&
+         isPCHSingleCC1Flag(unwrapClangArg(Args[I + 1]))) ||
+        ((Pass0 == "-include-pch" || Pass0 == "-pch-through-header") &&
+         I + 1 < Args.size() && !unwrapClangArg(Args[I + 1]).empty())) {
+      ++I;
+      return true;
+    }
+    if (isPCHSingleCC1Flag(Pass0))
+      return true;
+  }
+
+  // Direct 2-token: -include-pch <val> or -pch-through-header <val>
+  if ((S == "-include-pch" || S == "-pch-through-header") &&
+      I + 1 < Args.size() && Args[I + 1] != "--") {
+    ++I;
+    return true;
+  }
+  // Direct 1-token GCC/Clang PCH flags.
+  if (S == "-include-pch" || S == "-fpch-preprocess" ||
+      S == "-fno-pch-preprocess" || S == "-fpch-codegen" ||
+      S == "-fpch-debuginfo" || isPCHSingleCC1Flag(S)) {
+    return true;
+  }
+
+  if (ClangCL) {
+    if ((S == "/Fp:" || S == "-Fp:") && I + 1 < Args.size() &&
+        Args[I + 1] != "--") {
+      ++I;
+      return true;
+    }
+    if (S.starts_with("/Yc") || S.starts_with("-Yc") ||
+        S.starts_with("/Yu") || S.starts_with("-Yu") ||
+        S.starts_with("/Fp") || S.starts_with("-Fp")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isPCHGenerationCommand(const tooling::CompileCommand &Cmd, bool ClangCL) {
+  StringRef InputName = llvm::sys::path::filename(Cmd.Filename);
+  bool IsCMakePCHSource = InputName.starts_with_insensitive("cmake_pch.");
+  for (size_t I = 1; I < Cmd.CommandLine.size(); ++I) {
+    StringRef S = Cmd.CommandLine[I];
+    if (S == "--")
+      break;
+    StringRef Pass = unwrapClangArg(S);
+    if (S == "-emit-pch" || Pass == "-emit-pch")
+      return true;
+    if (ClangCL && IsCMakePCHSource &&
+        (S.starts_with("/Yc") || S.starts_with("-Yc")))
+      return true;
+  }
+  return false;
+}
+
+std::vector<std::string>
+scanQuotedIncludes(PathRef File, llvm::vfs::FileSystem &VFS,
+                   llvm::ArrayRef<std::string> ExtraIncludeDirs);
+
+std::string resolveHeaderPath(StringRef RawHdr, PathRef WorkDir,
+                              PathRef SourceFile, llvm::vfs::FileSystem &VFS,
+                              llvm::ArrayRef<std::string> ExtraIncDirs) {
+  if (RawHdr.empty())
+    return {};
+  auto IsFile = [&](PathRef P) {
+    auto St = VFS.status(P);
+    return St && !St->isDirectory();
+  };
+  std::string Direct = resolveRelativeTo(WorkDir, RawHdr);
+  if (IsFile(Direct))
+    return Direct;
+  for (const std::string &Dir : ExtraIncDirs) {
+    std::string Alt = resolveRelativeTo(Dir, RawHdr);
+    if (IsFile(Alt))
+      return Alt;
+  }
+  // If RawHdr was an absolute build-tree path (e.g. build/tool_pch.hpp.pch
+  // stripped to build/tool_pch.hpp), also probe by filename relative to the
+  // source file's directory and include directories.
+  StringRef NameOnly = llvm::sys::path::filename(RawHdr);
+  if (NameOnly != RawHdr && !NameOnly.empty()) {
+    if (!SourceFile.empty()) {
+      std::string Sibling = resolveRelativeTo(
+          llvm::sys::path::parent_path(SourceFile), NameOnly);
+      if (IsFile(Sibling))
+        return Sibling;
+    }
+    for (const std::string &Dir : ExtraIncDirs) {
+      std::string Alt = resolveRelativeTo(Dir, NameOnly);
+      if (IsFile(Alt))
+        return Alt;
+    }
+  }
+  return {};
+}
+
+struct ForcedPCHHeaders {
+  std::string PrimaryStdafx;
+  llvm::StringSet<> HeadersToStrip;
+  bool HasExplicitIncludeFlag = false;
+  std::string RecoveredFromIncludePCH;
+};
+
+ForcedPCHHeaders extractForcedAndPCHHeaders(
+    const tooling::CompileCommand &Cmd, llvm::vfs::FileSystem &VFS,
+    llvm::ArrayRef<std::string> ExtraIncDirs, bool ClangCL) {
+  ForcedPCHHeaders Result;
+  std::vector<std::string> ForcedCandidates;
+  std::vector<std::string> ThroughCandidates;
+
+  auto TryRecoverFromPCHArg = [&](StringRef PchArg) {
+    if (!PchArg.consume_back_insensitive(".pch") &&
+        !PchArg.consume_back_insensitive(".gch"))
+      return;
+    if (!isHeaderExtension(PchArg))
+      return;
+    if (Result.RecoveredFromIncludePCH.empty()) {
+      Result.RecoveredFromIncludePCH =
+          resolveHeaderPath(PchArg, Cmd.Directory, Cmd.Filename, VFS,
+                            ExtraIncDirs);
+    }
+  };
+
+  const auto &Args = Cmd.CommandLine;
+  for (size_t I = 1; I < Args.size(); ++I) {
+    StringRef S = Args[I];
+    if (S == "--")
+      break;
+
+    StringRef RawForced;
+    // -Xclang -include -Xclang <h>
+    if (S == "-Xclang" && I + 3 < Args.size() && Args[I + 1] == "-include" &&
+        Args[I + 2] == "-Xclang") {
+      RawForced = Args[I + 3];
+      I += 3;
+      Result.HasExplicitIncludeFlag = true;
+    } else if (S == "-Xclang" && I + 3 < Args.size() &&
+               Args[I + 1] == "-include-pch" && Args[I + 2] == "-Xclang") {
+      TryRecoverFromPCHArg(Args[I + 3]);
+      I += 3;
+      continue;
+    } else if (!unwrapClangArg(S).empty()) {
+      StringRef P0 = unwrapClangArg(S);
+      if (P0 == "-include" && I + 1 < Args.size() &&
+          !unwrapClangArg(Args[I + 1]).empty()) {
+        RawForced = unwrapClangArg(Args[++I]);
+        Result.HasExplicitIncludeFlag = true;
+      } else if (P0 == "-Xclang" && I + 3 < Args.size() &&
+                 unwrapClangArg(Args[I + 1]) == "-include" &&
+                 unwrapClangArg(Args[I + 2]) == "-Xclang" &&
+                 !unwrapClangArg(Args[I + 3]).empty()) {
+        RawForced = unwrapClangArg(Args[I + 3]);
+        I += 3;
+        Result.HasExplicitIncludeFlag = true;
+      } else if (P0 == "-include-pch" && I + 1 < Args.size() &&
+                 !unwrapClangArg(Args[I + 1]).empty()) {
+        TryRecoverFromPCHArg(unwrapClangArg(Args[++I]));
+        continue;
+      } else if (P0 == "-Xclang" && I + 3 < Args.size() &&
+                 unwrapClangArg(Args[I + 1]) == "-include-pch" &&
+                 unwrapClangArg(Args[I + 2]) == "-Xclang" &&
+                 !unwrapClangArg(Args[I + 3]).empty()) {
+        TryRecoverFromPCHArg(unwrapClangArg(Args[I + 3]));
+        I += 3;
+        continue;
+      } else if (P0.starts_with("-include-pch=")) {
+        TryRecoverFromPCHArg(P0.drop_front(strlen("-include-pch=")));
+        continue;
+      }
+    } else if (S == "-include" && I + 1 < Args.size() &&
+               Args[I + 1] != "--") {
+      RawForced = Args[++I];
+      Result.HasExplicitIncludeFlag = true;
+    } else if (S.starts_with("-include") && S.size() > 8 &&
+               !S.starts_with("-include-pch")) {
+      RawForced = S.drop_front(8);
+      Result.HasExplicitIncludeFlag = true;
+    } else if (S == "-include-pch" && I + 1 < Args.size() &&
+               Args[I + 1] != "--") {
+      TryRecoverFromPCHArg(Args[++I]);
+      continue;
+    } else if (S.starts_with("-include-pch=")) {
+      TryRecoverFromPCHArg(S.drop_front(strlen("-include-pch=")));
+      continue;
+    } else if (ClangCL) {
+      if ((S == "/FI" || S == "-FI") && I + 1 < Args.size() &&
+          Args[I + 1] != "--") {
+        RawForced = Args[++I];
+        Result.HasExplicitIncludeFlag = true;
+      } else if ((S.starts_with("/FI") || S.starts_with("-FI")) &&
+                 S.size() > 3) {
+        RawForced = S.drop_front(3);
+        Result.HasExplicitIncludeFlag = true;
+      } else if ((S.starts_with("/Yu") || S.starts_with("-Yu")) &&
+                 S.size() > 3) {
+        std::string Resolved =
+            resolveHeaderPath(S.drop_front(3), Cmd.Directory, Cmd.Filename, VFS,
+                              ExtraIncDirs);
+        if (!Resolved.empty())
+          ThroughCandidates.push_back(std::move(Resolved));
+      }
+    }
+
+    if (!RawForced.empty()) {
+      std::string Resolved =
+          resolveHeaderPath(RawForced, Cmd.Directory, Cmd.Filename, VFS,
+                            ExtraIncDirs);
+      if (!Resolved.empty())
+        ForcedCandidates.push_back(std::move(Resolved));
+    }
+  }
+
+  auto UnwrapAndRecord = [&](std::string H) {
+    Result.HeadersToStrip.insert(H);
+    if (llvm::sys::path::filename(H).starts_with_insensitive("cmake_pch.")) {
+      std::vector<std::string> Wrapped =
+          scanQuotedIncludes(H, VFS, ExtraIncDirs);
+      if (!Wrapped.empty() && isHeaderExtension(Wrapped.front())) {
+        H = Wrapped.front();
+        Result.HeadersToStrip.insert(H);
+      }
+    }
+    if (Result.PrimaryStdafx.empty() && isHeaderExtension(H))
+      Result.PrimaryStdafx = std::move(H);
+  };
+
+  for (std::string &H : ForcedCandidates)
+    UnwrapAndRecord(std::move(H));
+  if (Result.PrimaryStdafx.empty() && !ThroughCandidates.empty()) {
+    for (std::string &H : ThroughCandidates)
+      UnwrapAndRecord(std::move(H));
+  }
+  if (Result.PrimaryStdafx.empty() && !Result.RecoveredFromIncludePCH.empty())
+    UnwrapAndRecord(Result.RecoveredFromIncludePCH);
+
+  return Result;
+}
+
+bool matchesHeaderSet(StringRef RawHdr, PathRef WorkDir,
+                      llvm::ArrayRef<std::string> ExtraIncDirs,
+                      const llvm::StringSet<> &HeadersToStrip) {
+  if (HeadersToStrip.empty() || RawHdr.empty())
+    return false;
+  if (HeadersToStrip.contains(resolveRelativeTo(WorkDir, RawHdr)))
+    return true;
+  for (const std::string &Dir : ExtraIncDirs) {
+    if (HeadersToStrip.contains(resolveRelativeTo(Dir, RawHdr)))
+      return true;
+  }
+  return false;
+}
+
+// Strips output/compile-target/input-file/build-system-PCH arguments from a
+// unity compile command so it can serve as a clean base command for headers,
+// PCHs, and .cpp files.
+tooling::CompileCommand stripTargetAndOutputArgs(
+    const tooling::CompileCommand &Orig, PathRef OrigFileNorm, bool ClangCL,
+    llvm::ArrayRef<std::string> ExtraIncDirs,
+    const llvm::StringSet<> &HeadersToStrip) {
   tooling::CompileCommand Out = Orig;
   std::vector<std::string> Clean;
   Clean.reserve(Orig.CommandLine.size());
@@ -112,8 +417,70 @@ stripTargetAndOutputArgs(const tooling::CompileCommand &Orig,
     if (AfterDashDash)
       continue;
 
+    if (skipBuildSystemPCHArg(Orig.CommandLine, I, ClangCL))
+      continue;
+
+    // Strip forced includes (-include / /FI) that reference the umbrella header
+    // or CMake's cmake_pch wrapper so HdrCmd and DynSpec stay isolated.
+    if (S == "-Xclang" && I + 3 < Orig.CommandLine.size() &&
+        Orig.CommandLine[I + 1] == "-include" &&
+        Orig.CommandLine[I + 2] == "-Xclang") {
+      if (matchesHeaderSet(Orig.CommandLine[I + 3], Orig.Directory,
+                           ExtraIncDirs, HeadersToStrip)) {
+        I += 3;
+        continue;
+      }
+    }
+    if (!unwrapClangArg(S).empty()) {
+      StringRef P0 = unwrapClangArg(S);
+      if (P0 == "-include" && I + 1 < Orig.CommandLine.size() &&
+          !unwrapClangArg(Orig.CommandLine[I + 1]).empty() &&
+          matchesHeaderSet(unwrapClangArg(Orig.CommandLine[I + 1]),
+                           Orig.Directory, ExtraIncDirs, HeadersToStrip)) {
+        ++I;
+        continue;
+      }
+      if (P0 == "-Xclang" && I + 3 < Orig.CommandLine.size() &&
+          unwrapClangArg(Orig.CommandLine[I + 1]) == "-include" &&
+          unwrapClangArg(Orig.CommandLine[I + 2]) == "-Xclang" &&
+          !unwrapClangArg(Orig.CommandLine[I + 3]).empty() &&
+          matchesHeaderSet(unwrapClangArg(Orig.CommandLine[I + 3]),
+                           Orig.Directory, ExtraIncDirs, HeadersToStrip)) {
+        I += 3;
+        continue;
+      }
+    }
+    if (S == "-include" && I + 1 < Orig.CommandLine.size() &&
+        Orig.CommandLine[I + 1] != "--" &&
+        matchesHeaderSet(Orig.CommandLine[I + 1], Orig.Directory, ExtraIncDirs,
+                         HeadersToStrip)) {
+      ++I;
+      continue;
+    }
+    if (S.starts_with("-include") && S.size() > 8 &&
+        !S.starts_with("-include-pch") &&
+        matchesHeaderSet(S.drop_front(8), Orig.Directory, ExtraIncDirs,
+                         HeadersToStrip)) {
+      continue;
+    }
+    if (ClangCL) {
+      if ((S == "/FI" || S == "-FI") && I + 1 < Orig.CommandLine.size() &&
+          Orig.CommandLine[I + 1] != "--" &&
+          matchesHeaderSet(Orig.CommandLine[I + 1], Orig.Directory,
+                           ExtraIncDirs, HeadersToStrip)) {
+        ++I;
+        continue;
+      }
+      if ((S.starts_with("/FI") || S.starts_with("-FI")) && S.size() > 3 &&
+          matchesHeaderSet(S.drop_front(3), Orig.Directory, ExtraIncDirs,
+                           HeadersToStrip)) {
+        continue;
+      }
+    }
+
     if (S == "-o" || S == "-MF" || S == "-MT" || S == "-MQ" || S == "-MJ") {
-      ++I; // Skip flag and its value.
+      if (I + 1 < Orig.CommandLine.size())
+        ++I; // Skip flag and its value.
       continue;
     }
     if (S.starts_with("-o") && S.size() > 2)
@@ -127,11 +494,18 @@ stripTargetAndOutputArgs(const tooling::CompileCommand &Orig,
     if (S.starts_with("-x"))
       continue;
 
-    if (ClangCL &&
-        (S.starts_with("/Fo") || S.starts_with("/Fd") || S.starts_with("/Fp") ||
-         S.starts_with("/Yc") || S.starts_with("/Yu") || S == "/bigobj" ||
-         S.starts_with("/Tc") || S.starts_with("/Tp")))
-      continue;
+    if (ClangCL) {
+      if ((S == "/Fo:" || S == "-Fo:" || S == "/Fd:" || S == "-Fd:") &&
+          I + 1 < Orig.CommandLine.size() && Orig.CommandLine[I + 1] != "--") {
+        ++I;
+        continue;
+      }
+      if (S.starts_with("/Fo") || S.starts_with("-Fo") ||
+          S.starts_with("/Fd") || S.starts_with("-Fd") || S == "/bigobj" ||
+          S == "-bigobj" || S.starts_with("/Tc") || S.starts_with("/Tp")) {
+        continue;
+      }
+    }
 
     // Skip the original unity source file argument.
     if (llvm::sys::path::filename(S) == OrigFilename) {
@@ -145,6 +519,58 @@ stripTargetAndOutputArgs(const tooling::CompileCommand &Orig,
   Out.CommandLine = std::move(Clean);
   Out.Output.clear();
   return Out;
+}
+
+tooling::CompileCommand
+sanitizeNonUnityCommand(tooling::CompileCommand Cmd,
+                        const ThreadsafeFS &TFS) {
+  if (Cmd.CommandLine.size() <= 1)
+    return Cmd;
+  bool ClangCL = isClangCLMode(Cmd);
+  if (isPCHGenerationCommand(Cmd, ClangCL))
+    return Cmd;
+
+  auto VFS = TFS.view(Cmd.Directory);
+  std::vector<std::string> IncDirs = extractIncludeDirs(Cmd);
+  ForcedPCHHeaders Forced =
+      extractForcedAndPCHHeaders(Cmd, *VFS, IncDirs, ClangCL);
+
+  std::vector<std::string> Clean;
+  Clean.reserve(Cmd.CommandLine.size() + 2);
+  Clean.push_back(std::move(Cmd.CommandLine[0]));
+  size_t DashDashIdx = std::string::npos;
+
+  for (size_t I = 1; I < Cmd.CommandLine.size(); ++I) {
+    if (Cmd.CommandLine[I] == "--") {
+      DashDashIdx = Clean.size();
+      for (size_t J = I; J < Cmd.CommandLine.size(); ++J)
+        Clean.push_back(std::move(Cmd.CommandLine[J]));
+      break;
+    }
+    if (skipBuildSystemPCHArg(Cmd.CommandLine, I, ClangCL))
+      continue;
+    Clean.push_back(std::move(Cmd.CommandLine[I]));
+  }
+  Cmd.CommandLine = std::move(Clean);
+
+  if (!Forced.HasExplicitIncludeFlag && !Forced.RecoveredFromIncludePCH.empty()) {
+    std::vector<std::string> Extra;
+    if (ClangCL) {
+      Extra.push_back("/clang:-include");
+      Extra.push_back("/clang:" + Forced.RecoveredFromIncludePCH);
+    } else {
+      Extra.push_back("-include");
+      Extra.push_back(Forced.RecoveredFromIncludePCH);
+    }
+    if (DashDashIdx != std::string::npos) {
+      Cmd.CommandLine.insert(Cmd.CommandLine.begin() + DashDashIdx,
+                             std::make_move_iterator(Extra.begin()),
+                             std::make_move_iterator(Extra.end()));
+    } else {
+      llvm::append_range(Cmd.CommandLine, std::move(Extra));
+    }
+  }
+  return Cmd;
 }
 
 void appendIncludeArg(std::vector<std::string> &CmdLine, PathRef Header,
@@ -388,29 +814,45 @@ void UnityProjectCDB::scanFiles(llvm::ArrayRef<std::string> Files) {
     if (!Cmd)
       continue;
 
+    bool ClangCL = isClangCLMode(*Cmd);
+    if (isPCHGenerationCommand(*Cmd, ClangCL))
+      continue;
+
     auto VFS = TFS.view(Cmd->Directory);
     std::vector<std::string> IncDirs = extractIncludeDirs(*Cmd);
     std::vector<std::string> Includes =
         scanQuotedIncludes(NormFile, *VFS, IncDirs);
-    if (Includes.size() < 2)
+    if (Includes.empty())
       continue;
 
-    if (!isHeaderExtension(Includes.front()))
-      continue;
+    ForcedPCHHeaders Forced =
+        extractForcedAndPCHHeaders(*Cmd, *VFS, IncDirs, ClangCL);
 
+    std::string OwnerStdafx;
     std::vector<std::string> CppIncludes;
-    for (size_t I = 1; I < Includes.size(); ++I) {
-      if (isCppImplExtension(Includes[I]))
-        CppIncludes.push_back(Includes[I]);
+    if (Includes.size() >= 2 && isHeaderExtension(Includes.front())) {
+      OwnerStdafx = Includes.front();
+      Forced.HeadersToStrip.insert(OwnerStdafx);
+      for (size_t I = 1; I < Includes.size(); ++I) {
+        if (isCppImplExtension(Includes[I]))
+          CppIncludes.push_back(Includes[I]);
+      }
+    } else if (!Forced.PrimaryStdafx.empty()) {
+      OwnerStdafx = Forced.PrimaryStdafx;
+      Forced.HeadersToStrip.insert(OwnerStdafx);
+      for (size_t I = 0; I < Includes.size(); ++I) {
+        if (isCppImplExtension(Includes[I]))
+          CppIncludes.push_back(Includes[I]);
+      }
     }
-    if (CppIncludes.empty())
+    if (OwnerStdafx.empty() || CppIncludes.empty())
       continue;
 
-    bool ClangCL = isClangCLMode(*Cmd);
     UnityEntry Entry;
     Entry.UnityPath = NormFile;
-    Entry.OwnerStdafx = Includes.front();
-    Entry.BaseCmd = stripTargetAndOutputArgs(*Cmd, NormFile, ClangCL);
+    Entry.OwnerStdafx = std::move(OwnerStdafx);
+    Entry.BaseCmd = stripTargetAndOutputArgs(*Cmd, NormFile, ClangCL, IncDirs,
+                                             Forced.HeadersToStrip);
     Entry.ClangCL = ClangCL;
     Entry.ExtraIncDirs = std::move(IncDirs);
     Entry.IncludedCpps = std::move(CppIncludes);
@@ -599,6 +1041,15 @@ void UnityProjectCDB::scanFiles(llvm::ArrayRef<std::string> Files) {
       KnownSourceRoots.insert(normalizePath(SourceRoot));
     for (const std::string &F : Files)
       LastScannedFiles.push_back(F);
+    for (const PCHSpec &S : AnnouncedStaticPCHs) {
+      auto It = llvm::find_if(LastAnnouncedStaticPCHs, [&](const PCHSpec &E) {
+        return pathEqual(E.PCHHeader, S.PCHHeader);
+      });
+      if (It != LastAnnouncedStaticPCHs.end())
+        *It = S;
+      else
+        LastAnnouncedStaticPCHs.push_back(S);
+    }
   }
 
   log("(UnityCDB) Discovered {0} static PCHs, {1} unity TUs, {2} .cpp files, "
@@ -606,6 +1057,20 @@ void UnityProjectCDB::scanFiles(llvm::ArrayRef<std::string> Files) {
       AnnouncedStaticPCHs.size(), UnityEntries.size(), NewCppToInfo.size(),
       NewHeaderToInfo.size());
   OnPCHAnnounce.broadcast(std::move(AnnouncedStaticPCHs));
+}
+
+void UnityProjectCDB::replayPCHAnnounce() const {
+  if (!Opts.Enabled)
+    return;
+  std::vector<PCHSpec> Specs;
+  bool HasKnownRoots = false;
+  {
+    std::shared_lock<std::shared_mutex> Lock(Mu);
+    HasKnownRoots = !KnownSourceRoots.empty();
+    Specs = LastAnnouncedStaticPCHs;
+  }
+  if (HasKnownRoots || !Specs.empty())
+    OnPCHAnnounce.broadcast(std::move(Specs));
 }
 
 void UnityProjectCDB::notifyFileChanged(PathRef File) {
@@ -678,7 +1143,11 @@ UnityProjectCDB::getCompileCommand(PathRef File) const {
     }
   }
 
-  return Base ? Base->getCompileCommand(File) : std::nullopt;
+  if (Base) {
+    if (auto Cmd = Base->getCompileCommand(File))
+      return sanitizeNonUnityCommand(std::move(*Cmd), TFS);
+  }
+  return std::nullopt;
 }
 
 std::optional<PCHSpec> UnityProjectCDB::getPCHSpec(PathRef File) const {

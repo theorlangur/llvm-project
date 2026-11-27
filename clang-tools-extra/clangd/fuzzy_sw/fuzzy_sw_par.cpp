@@ -144,15 +144,17 @@ struct simd_prims_base {
   static constexpr IntType kMaskVal = static_cast<IntType>(-1);
 
   static void set_idx(size_t idx, int_type_t v, simd_base_t &t) {
-    int_type_t *p = reinterpret_cast<int_type_t *>(&t);
-    p[idx] = v;
+    alignas(alignof(simd_base_t)) int_type_t lanes[Width];
+    static_assert(sizeof(lanes) == sizeof(t), "SIMD lane size mismatch");
+    std::memcpy(lanes, &t, sizeof(lanes));
+    lanes[idx] = v;
+    std::memcpy(&t, lanes, sizeof(lanes));
   }
 
   static scores_t unpack(simd_base_t o) {
     scores_t s;
-    const int_type_t *pB = reinterpret_cast<const int_type_t *>(&o);
-    for (size_t i = 0; i < Width; ++i)
-      s[i] = pB[i];
+    static_assert(sizeof(s) == sizeof(o), "SIMD lane size mismatch");
+    std::memcpy(s.data(), &o, sizeof(s));
     return s;
   }
 };
@@ -395,14 +397,17 @@ struct alignas(64) ScoreCache {
 
   void Gather(char q, typename simd_t::simd_base_t tgt,
               typename simd_t::simd_base_t &out_scores) const {
-    const auto *pB =
-        reinterpret_cast<const typename simd_t::int_type_t *>(&tgt);
-    auto *pS = reinterpret_cast<typename simd_t::int_type_t *>(&out_scores);
+    alignas(alignof(typename simd_t::simd_base_t))
+        typename simd_t::int_type_t pB[simd_t::Width];
+    alignas(alignof(typename simd_t::simd_base_t))
+        typename simd_t::int_type_t pS[simd_t::Width];
+    std::memcpy(pB, &tgt, sizeof(pB));
     const uint8_t uq = static_cast<uint8_t>(q);
     for (size_t i = 0; i < simd_t::Width; ++i) {
       const uint8_t ut = static_cast<uint8_t>(pB[i]);
       pS[i] = static_cast<typename simd_t::int_type_t>(data[uq][ut]);
     }
+    out_scores = simd_t::load(pS);
   }
 };
 
@@ -499,23 +504,31 @@ template <class simd_t> struct SIMDImpl {
     void fill_cache_from_sources(input_char_src_span_t const &targets,
                                  int offset) {
       std::memset(m_CachedValidityMask, 0, sizeof(m_CachedValidityMask));
-      std::memset(m_CachedTargetValidityVecMask, 0,
-                  sizeof(m_CachedTargetValidityVecMask));
+
+      typename simd_t::int_type_t target_lanes[kTargetCacheSize][kWidth]{};
+      typename simd_t::int_type_t mask_lanes[kTargetCacheSize][kWidth]{};
 
       char local_buf[kTargetCacheSize];
+      size_t max_l = 0;
       for (size_t s = 0, n = targets.size(); s < n; ++s) {
         auto *pSrc = targets[s];
         size_t l = pSrc->read(local_buf, offset, kTargetCacheSize);
+        max_l = std::max(max_l, l);
         size_t m = size_t(1) << s;
         for (size_t i = 0; i < l; ++i) {
-          auto *pInt = reinterpret_cast<typename simd_t::int_type_t *>(
-              &m_CachedTargets[i]);
-          pInt[s] = static_cast<typename simd_t::int_type_t>(local_buf[i]);
+          target_lanes[i][s] =
+              static_cast<typename simd_t::int_type_t>(local_buf[i]);
           m_CachedValidityMask[i] |= m;
-          auto *pMask = reinterpret_cast<typename simd_t::int_type_t *>(
-              &m_CachedTargetValidityVecMask[i]);
-          pMask[s] = simd_t::kMaskVal;
+          mask_lanes[i][s] = simd_t::kMaskVal;
         }
+      }
+      for (size_t i = 0; i < max_l; ++i) {
+        m_CachedTargets[i] = simd_t::load(target_lanes[i]);
+        m_CachedTargetValidityVecMask[i] = simd_t::load(mask_lanes[i]);
+      }
+      for (size_t i = max_l; i < kTargetCacheSize; ++i) {
+        std::memset(&m_CachedTargetValidityVecMask[i], 0,
+                    sizeof(m_CachedTargetValidityVecMask[i]));
       }
     }
 

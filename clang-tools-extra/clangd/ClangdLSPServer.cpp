@@ -781,7 +781,8 @@ void ClangdLSPServer::onDocumentDidSave(
   PathRef File = Params.textDocument.uri.file();
   if (UnityCDB)
     UnityCDB->notifyFileChanged(File);
-  Server->checkChangedFile(File);
+  if (Server->checkChangedFile(File))
+    return;
   Server->reparseOpenFilesIfNeeded([](llvm::StringRef) { return true; });
 }
 

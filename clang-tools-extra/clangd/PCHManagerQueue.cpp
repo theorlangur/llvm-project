@@ -97,5 +97,12 @@ void PCHQueue::append(std::vector<Task> Tasks) {
   CV.notify_all();
 }
 
+bool PCHQueue::blockUntilIdle(Deadline D) const {
+  std::unique_lock<std::mutex> Lock(Mu);
+  return clangd::wait(Lock, CV, D, [&] {
+    return ShouldStop || (Stat.Active == 0 && Queue.empty());
+  });
+}
+
 } // namespace clangd
 } // namespace clang

@@ -67,6 +67,7 @@ public:
   bool blockUntilIdle(Deadline D) const override;
 
   std::optional<PCHSpec> getPCHSpec(PathRef File) const override;
+  void replayPCHAnnounce() const override;
 
   /// Explicitly scans \p Files (used by CDB broadcast watcher and unit tests).
   void scanFiles(llvm::ArrayRef<std::string> Files);
@@ -116,6 +117,7 @@ private:
   llvm::StringSet<> TrackedUmbrellas;            // all known stdafx paths
   llvm::StringSet<> KnownSourceRoots;            // roots already scanned
   std::vector<std::string> LastScannedFiles;     // for live re-scan on edits
+  std::vector<PCHSpec> LastAnnouncedStaticPCHs;  // cached for late listeners
 
   // Must be declared last so subscription disconnects before member teardown.
   CommandChanged::Subscription BaseChanged;

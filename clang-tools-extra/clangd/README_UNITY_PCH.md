@@ -2,7 +2,7 @@
 
 ## Overview
 Built on LLVM `llvmorg-23.1.6`, this branch extends `clangd` for large legacy C++ unity-build codebases using hierarchical `stdafx`-style precompiled headers—without preprocessing `compile_commands.json`:
-- **`UnityProjectCDB`**: Automatically discovers unity translation units, hierarchical parent-to-child PCH chains, and both `#pragma once` and `#ifndef`-guarded headers from standard `compile_commands.json` (passing non-unity projects through transparently).
+- **`UnityProjectCDB`**: Automatically discovers unity translation units, hierarchical parent-to-child PCH chains, and both `#pragma once` and `#ifndef`-guarded headers from standard `compile_commands.json` (passing non-unity projects through transparently). Also handles projects using CMake `target_precompile_headers` (`cmake_pch` wrappers), `-include-pch`, or `clang-cl` `/Yu`/`/Yc`/`/Fp` by stripping external `.pch` flags and unwrapping PCH headers cleanly.
 - **`PCHManager` v2**: Builds hierarchical static `.pch_cache` files asynchronously and synthesizes small in-memory chained dynamic PCHs for individual non-self-contained headers (truncated just before the target header via `PPSkipIncludes`).
 - **Workspace Symbol Search (`--workspace-symbol-fuzzy-sw`)**: Optional generation-cached Smith-Waterman fuzzy matcher across `MemIndex`, `Dex`, and `MergedIndex`.
 - **Multi-Invocation Tweaks**: `CreateOutline`, `OverrideVirtualMulti`, `ChangeSignature`, and `AddRemoveMethodConst` via standard `textDocument/codeAction`.

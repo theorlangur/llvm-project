@@ -92,6 +92,7 @@ public:
   PCHAnnounce::Subscription watch(PCHAnnounce::Listener L) const {
     return OnPCHAnnounce.observe(std::move(L));
   }
+  virtual void replayPCHAnnounce() const {}
 
 protected:
   std::optional<std::string> FallbackWorkingDirectory;
@@ -122,6 +123,7 @@ public:
   bool blockUntilIdle(Deadline D) const override;
 
   std::optional<PCHSpec> getPCHSpec(PathRef File) const override;
+  void replayPCHAnnounce() const override;
 
 private:
   const GlobalCompilationDatabase *Base;

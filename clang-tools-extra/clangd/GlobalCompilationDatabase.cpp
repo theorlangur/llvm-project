@@ -929,5 +929,10 @@ std::optional<PCHSpec> DelegatingCDB::getPCHSpec(PathRef File) const {
   return Base->getPCHSpec(File);
 }
 
+void DelegatingCDB::replayPCHAnnounce() const {
+  if (Base)
+    Base->replayPCHAnnounce();
+}
+
 } // namespace clangd
 } // namespace clang

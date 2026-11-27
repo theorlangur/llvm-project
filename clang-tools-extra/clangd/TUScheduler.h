@@ -276,6 +276,12 @@ public:
   /// if requested with WantDiags::Auto or WantDiags::Yes.
   void remove(PathRef File);
 
+  /// Schedule asynchronous reparses for tracked open files matching \p Filter
+  /// after a PCH rebuild wave completed. Safe to call from background threads.
+  void reparseAfterPCH(
+      llvm::function_ref<bool(PathRef File, const tooling::CompileCommand &Cmd)>
+          Filter);
+
   /// Schedule an async task with no dependencies.
   /// Path may be empty (it is used only to set the Context).
   void run(llvm::StringRef Name, llvm::StringRef Path,
@@ -373,6 +379,7 @@ private:
   const PCHManager *PCHMgr = nullptr;
   Semaphore Barrier;
   Semaphore QuickRunBarrier;
+  mutable std::mutex FilesMu;
   llvm::StringMap<std::unique_ptr<FileData>> Files;
   std::unique_ptr<ASTCache> IdleASTs;
   std::unique_ptr<HeaderIncluderCache> HeaderIncluders;

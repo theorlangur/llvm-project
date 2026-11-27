@@ -1429,13 +1429,14 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
       Input.ParseInput.TFS->view(Input.ParseInput.CompileCommand.Directory);
   if (Input.Preamble && Input.Preamble->StatCache)
     VFS = Input.Preamble->StatCache->getConsumingFS(std::move(VFS));
+  bool UsedPCH = false;
   if (!CompletingInPreamble && !Input.ParseInput.Opts.SkipPreambleBuild &&
       Input.PCH)
-    Input.PCH.addPCH(CI.get(), VFS);
+    UsedPCH = Input.PCH.addPCH(CI.get(), VFS);
   auto Clang = prepareCompilerInstance(
       std::move(CI),
       (!CompletingInPreamble && !Input.ParseInput.Opts.SkipPreambleBuild &&
-       Input.Preamble && !Input.PCH)
+       Input.Preamble && !UsedPCH)
           ? &Input.Preamble->Preamble
           : nullptr,
       std::move(ContentsBuffer), std::move(VFS), IgnoreDiags);

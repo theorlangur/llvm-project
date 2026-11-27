@@ -6,6 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ClangdServer.h"
+#include "CompileCommands.h"
+#include "Compiler.h"
 #include "FindSymbols.h"
 #include "GlobalCompilationDatabase.h"
 #include "PCHManager.h"
@@ -24,12 +27,14 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -378,6 +383,377 @@ TEST(FuzzySWTests, ScalarSIMDAndWorkspaceSymbolCache) {
   EXPECT_EQ((*Res2)[0].name, "WorldTwo");
 
   Matcher.StopThreads();
+}
+
+TEST(UnityPCHTests, ProjectWithActiveIncludePCHFlags) {
+  // Part A: CommandMangler strips pre-existing build-system PCH flags in both
+  // GCC/Clang and clang-cl modes without losing forced-include or input args.
+  {
+    auto Mangler = CommandMangler::forTests();
+    tooling::CompileCommand Cmd;
+    Cmd.CommandLine = {
+        "clang++", "-std=c++20", "-Winvalid-pch",
+        "-Xclang", "-include-pch", "-Xclang", "/nonexistent/cmake_pch.hxx.pch",
+        "-Xclang", "-include", "-Xclang", "/path/to/cmake_pch.hxx",
+        "-include-pch", "/nonexistent/other.pch",
+        "-include-pch=/nonexistent/joined.pch",
+        "-Xclang", "-emit-pch", "-Xclang", "-building-pch-with-obj",
+        "-c", "foo.cpp"};
+    Mangler(Cmd, "foo.cpp");
+    EXPECT_THAT(Cmd.CommandLine,
+                testing::AllOf(
+                    testing::Not(testing::Contains("-include-pch")),
+                    testing::Not(testing::Contains("/nonexistent/cmake_pch.hxx.pch")),
+                    testing::Not(testing::Contains("/nonexistent/other.pch")),
+                    testing::Not(testing::Contains("-include-pch=/nonexistent/joined.pch")),
+                    testing::Not(testing::Contains("-emit-pch")),
+                    testing::Not(testing::Contains("-building-pch-with-obj")),
+                    testing::Not(testing::Contains("-Winvalid-pch")),
+                    testing::Contains("-include"),
+                    testing::Contains("/path/to/cmake_pch.hxx")));
+  }
+  {
+    auto Mangler = CommandMangler::forTests();
+    tooling::CompileCommand Cmd;
+    Cmd.CommandLine = {
+        "clang-cl", "/Yustdafx.h", "/Fpbuild/app.pch", "/Fp:", "build/alt.pch",
+        "/clang:-include-pch", "/clang:build/c.pch", "/c", "foo.cpp"};
+    Mangler(Cmd, "foo.cpp");
+    EXPECT_THAT(Cmd.CommandLine,
+                testing::AllOf(
+                    testing::Not(testing::Contains("/Yustdafx.h")),
+                    testing::Not(testing::Contains("/Fpbuild/app.pch")),
+                    testing::Not(testing::Contains("/Fp:")),
+                    testing::Not(testing::Contains("build/alt.pch")),
+                    testing::Not(testing::Contains("/clang:-include-pch")),
+                    testing::Not(testing::Contains("/clang:build/c.pch")),
+                    testing::Contains("foo.cpp")));
+
+    // Bare /Yu with no joined header must NOT consume the positional input file.
+    tooling::CompileCommand HdrStopCmd;
+    HdrStopCmd.CommandLine = {"clang-cl", "/Yu", "/Fpfoo.pch", "foo.cpp"};
+    Mangler(HdrStopCmd, "foo.cpp");
+    EXPECT_THAT(HdrStopCmd.CommandLine,
+                testing::AllOf(testing::Not(testing::Contains("/Yu")),
+                               testing::Not(testing::Contains("/Fpfoo.pch")),
+                               testing::Contains("foo.cpp")));
+  }
+
+  // Part B: End-to-end CMake CMAKE_UNITY_BUILD + target_precompile_headers
+  // with 2 levels, cmake_pch.hxx wrappers, nonexistent .pch binaries on disk,
+  // and a standalone -include-pch non-unity TU.
+  TempDir Tmp("cmake-pch-unity-test");
+  std::string BuildDir = Tmp.path("build");
+
+  std::string CoreStdafx = Tmp.path("src/core/stdafx.hpp");
+  std::string CoreImpl = Tmp.path("src/core/impl.cpp");
+  std::string AppStdafx = Tmp.path("src/app/stdafx.hpp");
+  std::string AppPre = Tmp.path("src/app/pre.hpp");
+  std::string AppWorld = Tmp.path("src/app/world.hpp");
+  std::string AppPost = Tmp.path("src/app/post.hpp");
+  std::string AppImpl = Tmp.path("src/app/impl.cpp");
+
+  std::string CoreCMakePCH = BuildDir + "/CMakeFiles/core.dir/cmake_pch.hxx";
+  std::string CoreCMakePCHSrc =
+      BuildDir + "/CMakeFiles/core.dir/cmake_pch.hxx.cxx";
+  std::string CoreCMakePCHBin =
+      BuildDir + "/CMakeFiles/core.dir/cmake_pch.hxx.pch";
+  std::string CoreUnity =
+      BuildDir + "/CMakeFiles/core.dir/Unity/unity_0_cxx.cxx";
+
+  std::string AppCMakePCH = BuildDir + "/CMakeFiles/app.dir/cmake_pch.hxx";
+  std::string AppCMakePCHSrc =
+      BuildDir + "/CMakeFiles/app.dir/cmake_pch.hxx.cxx";
+  std::string AppCMakePCHBin =
+      BuildDir + "/CMakeFiles/app.dir/cmake_pch.hxx.pch";
+  std::string AppUnity =
+      BuildDir + "/CMakeFiles/app.dir/Unity/unity_0_cxx.cxx";
+
+  std::string ToolPCHHdr = Tmp.path("src/tools/tool_pch.hpp");
+  std::string ToolPCHBin = BuildDir + "/tool_pch.hpp.pch";
+  std::string ToolCpp = Tmp.path("src/tools/tool.cpp");
+
+  writeFileText(CoreStdafx,
+                "#pragma once\n#define CORE_MAGIC 42\ninline int core_val() { return CORE_MAGIC; }\n");
+  writeFileText(CoreImpl, "int call_core() { return core_val(); }\n");
+  writeFileText(AppPre, "#pragma once\nstruct PreWorld { int a = core_val(); };\n");
+  writeFileText(AppWorld,
+                "#pragma once\nstruct WorldThing { PreWorld p; };\n");
+  writeFileText(AppPost, "#pragma once\nstruct PostWorldOnly { int z = 9; };\n");
+  writeFileText(AppStdafx,
+                "#pragma once\n#include \"core/stdafx.hpp\"\n"
+                "#include \"app/pre.hpp\"\n#include \"app/world.hpp\"\n"
+                "#include \"app/post.hpp\"\n");
+  writeFileText(AppImpl, "int call_app() { WorldThing w; return w.p.a; }\n");
+
+  writeFileText(CoreCMakePCH, "#include \"" + CoreStdafx + "\"\n");
+  writeFileText(CoreCMakePCHSrc, "/* CMake PCH TU */\n");
+  writeFileText(CoreUnity, "#include \"" + CoreImpl + "\"\n");
+
+  writeFileText(AppCMakePCH, "#include \"" + AppStdafx + "\"\n");
+  writeFileText(AppCMakePCHSrc, "/* CMake PCH TU */\n");
+  writeFileText(AppUnity, "#include \"" + AppImpl + "\"\n");
+
+  writeFileText(ToolPCHHdr, "#pragma once\ninline int tool_helper() { return 7; }\n");
+  writeFileText(ToolCpp, "int use_tool() { return tool_helper(); }\n");
+  // Intentionally write a corrupt external .pch to ensure clangd never loads it.
+  writeFileText(CoreCMakePCHBin, "NOT_A_VALID_PCH");
+
+  llvm::json::Array DB;
+  DB.push_back(llvm::json::Object{
+      {"directory", BuildDir},
+      {"command", "clang++ -std=c++20 -I" + Tmp.path("src") +
+                      " -Winvalid-pch -Xclang -emit-pch -Xclang -include "
+                      "-Xclang " + CoreCMakePCH + " -c " + CoreCMakePCHSrc},
+      {"file", CoreCMakePCHSrc},
+  });
+  DB.push_back(llvm::json::Object{
+      {"directory", BuildDir},
+      {"command", "clang++ -std=c++20 -I" + Tmp.path("src") +
+                      " -Winvalid-pch -Xclang -include-pch -Xclang " +
+                      CoreCMakePCHBin + " -Xclang -include -Xclang " +
+                      CoreCMakePCH + " -c " + CoreUnity},
+      {"file", CoreUnity},
+  });
+  DB.push_back(llvm::json::Object{
+      {"directory", BuildDir},
+      {"command", "clang++ -std=c++20 -I" + Tmp.path("src") +
+                      " -Winvalid-pch -Xclang -emit-pch -Xclang -include "
+                      "-Xclang " + AppCMakePCH + " -c " + AppCMakePCHSrc},
+      {"file", AppCMakePCHSrc},
+  });
+  DB.push_back(llvm::json::Object{
+      {"directory", BuildDir},
+      {"command", "clang++ -std=c++20 -I" + Tmp.path("src") +
+                      " -Winvalid-pch -Xclang -include-pch -Xclang " +
+                      AppCMakePCHBin + " -Xclang -include -Xclang " +
+                      AppCMakePCH + " -c " + AppUnity},
+      {"file", AppUnity},
+  });
+  DB.push_back(llvm::json::Object{
+      {"directory", BuildDir},
+      {"command", "clang++ -std=c++20 -I" + Tmp.path("src") +
+                      " -include-pch " + ToolPCHBin + " -c " + ToolCpp},
+      {"file", ToolCpp},
+  });
+  writeFileText(BuildDir + "/compile_commands.json",
+                llvm::formatv("{0:2}", llvm::json::Value(std::move(DB))).str());
+
+  RealThreadsafeFS TFS;
+  DirectoryBasedGlobalCompilationDatabase::Options CDBOpts(TFS);
+  CDBOpts.CompileCommandsDir = BuildDir;
+  CDBOpts.ClangdCacheDir = "clangd_test";
+  auto BaseCDB =
+      std::make_unique<DirectoryBasedGlobalCompilationDatabase>(CDBOpts);
+  auto UnityOwner = std::make_unique<UnityProjectCDB>(std::move(BaseCDB), TFS);
+  OverlayCDB MangledCDB(UnityOwner.get(), {}, CommandMangler::forTests());
+
+  auto WorldSpec = MangledCDB.getPCHSpec(AppWorld);
+  ASSERT_TRUE(WorldSpec.has_value());
+  EXPECT_TRUE(WorldSpec->IsDynamic);
+  EXPECT_EQ(llvm::sys::path::filename(WorldSpec->UmbrellaHeader), "stdafx.hpp");
+  EXPECT_EQ(llvm::sys::path::filename(WorldSpec->ParentPCHHeader), "stdafx.hpp");
+  // Ensure BaseCmd stripped cmake_pch.hxx so HdrCmd and DynSpec stay isolated.
+  auto WorldCmd = MangledCDB.getCompileCommand(AppWorld);
+  ASSERT_TRUE(WorldCmd.has_value());
+  EXPECT_THAT(WorldCmd->CommandLine,
+              testing::AllOf(testing::Not(testing::Contains(AppCMakePCH)),
+                             testing::Not(testing::Contains(AppCMakePCHBin)),
+                             testing::Not(testing::Contains("-include-pch"))));
+
+  // Standalone -include-pch without -include recovers -include tool_pch.hpp.
+  auto ToolCmd = MangledCDB.getCompileCommand(ToolCpp);
+  ASSERT_TRUE(ToolCmd.has_value());
+  EXPECT_THAT(ToolCmd->CommandLine,
+              testing::AllOf(testing::Not(testing::Contains("-include-pch")),
+                             testing::Contains("-include"),
+                             testing::Contains(ToolPCHHdr)));
+
+  ParsingCallbacks NoopCallbacks;
+  PCHManager::Options PCHOpts;
+  PCHOpts.StorePCHInMemory = true;
+  PCHOpts.WaitForInit = true;
+  PCHOpts.WorkspaceRoot = Tmp.root();
+  PCHOpts.ClangdCacheDir = "clangd_test";
+  PCHOpts.MaxConcurrency = 2;
+  PCHManager Mgr(MangledCDB, TFS, NoopCallbacks, PCHOpts);
+
+  auto FS = TFS.view(std::nullopt);
+  ASSERT_TRUE(Mgr.tryAddDynamicPCH(AppWorld, FS));
+  PCHManager::PCHAccess DynAccess;
+  for (int Attempt = 0; Attempt < 200; ++Attempt) {
+    DynAccess = Mgr.tryFindPCH(AppWorld, *WorldCmd);
+    if (DynAccess && DynAccess.filename() == AppWorld)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  ASSERT_TRUE(bool(DynAccess));
+
+  // Verify WorldThing compiles cleanly in isolation (no redefinition from
+  // leaked cmake_pch.hxx; PreWorld is visible; PostWorldOnly is not).
+  ParseInputs Inputs;
+  Inputs.TFS = &TFS;
+  Inputs.CompileCommand = *WorldCmd;
+  Inputs.Contents =
+      "#pragma once\n"
+      "struct WorldThing { PreWorld p; int ok = CORE_MAGIC; };\n";
+  IgnoreDiagnostics IgnoreDiags;
+  auto CI = buildCompilerInvocation(Inputs, IgnoreDiags);
+  ASSERT_TRUE(CI != nullptr);
+  auto AST = ParsedAST::build(AppWorld, Inputs, std::move(CI), {}, nullptr,
+                              &DynAccess);
+  ASSERT_TRUE(AST.has_value());
+  for (const auto &D : AST->getDiagnostics())
+    EXPECT_NE(D.Severity, DiagnosticsEngine::Error) << D.Message;
+
+  // Verify standalone tool.cpp with recovered -include builds cleanly too.
+  ParseInputs ToolInputs;
+  ToolInputs.TFS = &TFS;
+  ToolInputs.CompileCommand = *ToolCmd;
+  ToolInputs.Contents = "int use_tool() { return tool_helper(); }\n";
+  auto ToolCI = buildCompilerInvocation(ToolInputs, IgnoreDiags);
+  ASSERT_TRUE(ToolCI != nullptr);
+  auto ToolPreamble = buildPreamble(ToolCpp, *ToolCI, ToolInputs, true, {});
+  ASSERT_TRUE(ToolPreamble != nullptr);
+  auto ToolAST = ParsedAST::build(ToolCpp, ToolInputs, std::move(ToolCI), {},
+                                  ToolPreamble, nullptr);
+  ASSERT_TRUE(ToolAST.has_value());
+  for (const auto &D : ToolAST->getDiagnostics())
+    EXPECT_NE(D.Severity, DiagnosticsEngine::Error) << D.Message;
+}
+
+TEST(UnityPCHTests, LowerLayerHeaderEditInvalidationAndSafety) {
+  TempDir Tmp("lower-layer-edit-test");
+  std::string BuildDir = Tmp.path("build");
+
+  std::string CoreStdafx = Tmp.path("src/core/stdafx.hpp");
+  std::string CoreVec3 = Tmp.path("src/core/vec3.hpp");
+  std::string CoreImpl = Tmp.path("src/core/impl.cpp");
+  std::string AppStdafx = Tmp.path("src/app/stdafx.hpp");
+  std::string AppWorld = Tmp.path("src/app/world.hpp");
+  std::string AppImpl = Tmp.path("src/app/impl.cpp");
+  std::string UnityCore = Tmp.path("src/unity_core.cpp");
+  std::string UnityApp = Tmp.path("src/unity_app.cpp");
+
+  std::string Vec3V1 = "#pragma once\nstruct Vec3 { int x = 1; };\n";
+  std::string WorldV1 =
+      "#pragma once\nstruct World { Vec3 v; int val() const { return v.x; } };\n";
+
+  writeFileText(CoreVec3, Vec3V1);
+  writeFileText(CoreStdafx, "#pragma once\n#include \"core/vec3.hpp\"\n");
+  writeFileText(CoreImpl, "int f_core() { return Vec3{}.x; }\n");
+  writeFileText(AppWorld, WorldV1);
+  writeFileText(
+      AppStdafx,
+      "#pragma once\n#include \"core/stdafx.hpp\"\n#include \"app/world.hpp\"\n");
+  writeFileText(AppImpl, "int f_app() { return World{}.val(); }\n");
+  writeFileText(UnityCore,
+                "#include \"core/stdafx.hpp\"\n#include \"core/impl.cpp\"\n");
+  writeFileText(UnityApp,
+                "#include \"app/stdafx.hpp\"\n#include \"app/impl.cpp\"\n");
+
+  llvm::json::Array DB;
+  for (const std::string &TU : {UnityCore, UnityApp}) {
+    std::string Cmd =
+        "clang++ -std=c++20 -I" + Tmp.path("src") + " -c " + TU;
+    DB.push_back(llvm::json::Object{
+        {"directory", BuildDir},
+        {"command", Cmd},
+        {"file", TU},
+    });
+  }
+  writeFileText(BuildDir + "/compile_commands.json",
+                llvm::formatv("{0:2}", llvm::json::Value(std::move(DB))).str());
+
+  RealThreadsafeFS TFS;
+  DirectoryBasedGlobalCompilationDatabase::Options CDBOpts(TFS);
+  CDBOpts.CompileCommandsDir = BuildDir;
+  CDBOpts.ClangdCacheDir = "clangd_test";
+  auto BaseCDB =
+      std::make_unique<DirectoryBasedGlobalCompilationDatabase>(CDBOpts);
+  auto UnityOwner = std::make_unique<UnityProjectCDB>(std::move(BaseCDB), TFS);
+  OverlayCDB MangledCDB(UnityOwner.get(), {}, CommandMangler::forTests());
+
+  struct DiagCapture : public ClangdServer::Callbacks {
+    std::mutex Mu;
+    llvm::StringMap<std::vector<Diag>> DiagsByFile;
+    void onDiagnosticsReady(PathRef File, llvm::StringRef,
+                            llvm::ArrayRef<Diag> Diagnostics) override {
+      std::lock_guard<std::mutex> G(Mu);
+      DiagsByFile[File].assign(Diagnostics.begin(), Diagnostics.end());
+    }
+  } Capture;
+
+  ClangdServer::Options SOpts = ClangdServer::optsForTest();
+  SOpts.EnablePCH = true;
+  SOpts.StorePCHInMemory = true;
+  SOpts.PCHAlwaysWait = true;
+  SOpts.WorkspaceRoot = Tmp.root();
+  SOpts.ClangdCacheDir = "clangd_test";
+  SOpts.PCHMaxConcurrency = 2;
+
+  ClangdServer Server(MangledCDB, TFS, SOpts, &Capture);
+  Server.addDocument(CoreVec3, Vec3V1, "1", WantDiagnostics::Yes);
+  Server.addDocument(AppWorld, WorldV1, "1", WantDiagnostics::Yes);
+  ASSERT_TRUE(Server.blockUntilIdleForTest(30));
+
+  // Unsaved draft edits changing size heavily must not crash or corrupt L2.
+  std::string Vec3Draft =
+      "#pragma once\n// extra draft padding to alter file byte size...\n"
+      "struct Vec3 { int x = 1; int tmp_unsaved(); };\n";
+  Server.addDocument(CoreVec3, Vec3Draft, "2", WantDiagnostics::Yes, false,
+                     /*AfterChange=*/true);
+  ASSERT_TRUE(Server.blockUntilIdleForTest(30));
+
+  // Now save lower-layer header with a new symbol and reference it from L2.
+  std::string Vec3V2 =
+      "#pragma once\n// Saved lower-layer header with new API\n"
+      "struct Vec3 { int x = 1; };\n"
+      "inline int newlyAddedLowerLayerFn() { return 123; }\n";
+  std::string WorldV2 =
+      "#pragma once\nstruct World { Vec3 v; int val() const { return v.x + newlyAddedLowerLayerFn(); } };\n";
+  writeFileText(CoreVec3, Vec3V2);
+  writeFileText(AppWorld, WorldV2);
+  Server.addDocument(CoreVec3, Vec3V2, "3", WantDiagnostics::Yes);
+  EXPECT_TRUE(Server.checkChangedFile(CoreVec3));
+  Server.addDocument(AppWorld, WorldV2, "2", WantDiagnostics::Yes);
+  ASSERT_TRUE(Server.blockUntilIdleForTest(30));
+
+  {
+    std::lock_guard<std::mutex> G(Capture.Mu);
+    for (const auto &F : {CoreVec3, AppWorld}) {
+      auto It = Capture.DiagsByFile.find(F);
+      ASSERT_NE(It, Capture.DiagsByFile.end()) << "Missing diags for " << F;
+      for (const auto &D : It->second)
+        EXPECT_NE(D.Severity, DiagnosticsEngine::Error) << F << ": " << D.Message;
+    }
+  }
+
+  // Directly verify PCHAccess::addPCH size-mismatch safety guard: if a workspace
+  // header changes size on disk before invalidation runs, addPCH rejects the
+  // stale PCH snapshot rather than letting Clang read invalid SLocEntry offsets.
+  ParsingCallbacks NoopCallbacks;
+  PCHManager::Options PCHOpts;
+  PCHOpts.StorePCHInMemory = true;
+  PCHOpts.WaitForInit = true;
+  PCHOpts.WorkspaceRoot = Tmp.root();
+  PCHOpts.ClangdCacheDir = "clangd_test";
+  PCHManager GuardMgr(MangledCDB, TFS, NoopCallbacks, PCHOpts);
+  auto CmdApp = MangledCDB.getCompileCommand(AppImpl);
+  ASSERT_TRUE(CmdApp.has_value());
+  auto Access = GuardMgr.findPCH(AppImpl, *CmdApp);
+  ASSERT_TRUE(bool(Access));
+
+  writeFileText(CoreVec3, Vec3V2 + "\n// Resize before invalidation runs\nint extra_fn();\n");
+  ParseInputs TestInputs;
+  TestInputs.TFS = &TFS;
+  TestInputs.CompileCommand = *CmdApp;
+  IgnoreDiagnostics IgnoreDiags;
+  auto TestCI = buildCompilerInvocation(TestInputs, IgnoreDiags);
+  ASSERT_TRUE(TestCI != nullptr);
+  auto FreshVFS = TFS.view(CmdApp->Directory);
+  EXPECT_FALSE(Access.addPCH(TestCI.get(), FreshVFS));
+  EXPECT_TRUE(GuardMgr.blockUntilIdle(timeoutSeconds(30)));
 }
 
 } // namespace

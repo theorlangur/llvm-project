@@ -45,13 +45,37 @@ namespace clangd {
 namespace {
 
 constexpr char kPCHCacheMagic[4] = {'C', 'P', 'C', 'H'};
-constexpr uint32_t kPCHCacheSchemaVersion = 2;
+constexpr uint32_t kPCHCacheSchemaVersion = 3;
 
 std::string normalizeKey(PathRef P) {
   llvm::SmallString<256> Buf(P);
   llvm::sys::path::native(Buf);
   llvm::sys::path::remove_dots(Buf, /*remove_dot_dot=*/true);
   return normalizePathDriveLetter(Buf);
+}
+
+llvm::ErrorOr<llvm::vfs::Status> statusWithDriveFallback(llvm::vfs::FileSystem &VFS,
+                                                         StringRef Path) {
+  auto Status = VFS.status(Path);
+  if (!Status &&
+      llvm::sys::path::is_style_windows(llvm::sys::path::Style::native)) {
+    std::string Alt = normalizePathDriveLetter(Path, true);
+    Status = VFS.status(Alt);
+    if (!Status) {
+      Alt = normalizePathDriveLetter(Path, false);
+      Status = VFS.status(Alt);
+    }
+  }
+  return Status;
+}
+
+std::string resolveFileEntryNormalized(SourceManager &SM, FileEntryRef FE) {
+  StringRef Real = FE.getFileEntry().tryGetRealPathName();
+  if (!Real.empty())
+    return normalizeKey(Real);
+  llvm::SmallString<256> Buf(FE.getName());
+  SM.getFileManager().makeAbsolutePath(Buf);
+  return normalizeKey(Buf);
 }
 
 bool isWorkspaceHeader(PathRef Header, PathRef WorkspaceRoot,
@@ -219,6 +243,7 @@ PCHManager::PCHManager(const GlobalCompilationDatabase &CDB,
       });
   PCHAnnounce =
       CDB.watch([this](const std::vector<PCHSpec> &Specs) { enqueue(Specs); });
+  CDB.replayPCHAnnounce();
 }
 
 PCHManager::~PCHManager() {
@@ -308,39 +333,88 @@ std::optional<std::string> PCHManager::getPCHCacheDirFor(PathRef File) const {
   return std::nullopt;
 }
 
-void PCHManager::checkChangedFile(PathRef File, FSType FS, bool Force) {
+bool PCHManager::checkChangedFile(PathRef File, FSType FS, bool Force,
+                                  bool Immediate) {
   if (!Initialized.load(std::memory_order_acquire)) {
     if (DbgLog)
       log("(PCH) checkChangedFile: not initialized yet");
-    return;
+    return false;
   }
 
   std::string NormFile = normalizeKey(File);
   {
     shared_lck SharedAccess(UsedHeadersLock);
     if (!AllUsedHeaders.contains(NormFile)) {
-      std::string Alt = normalizePathDriveLetter(NormFile, true);
-      if (!AllUsedHeaders.contains(Alt)) {
+      std::string AltUpper = normalizePathDriveLetter(NormFile, true);
+      std::string AltLower = normalizePathDriveLetter(NormFile, false);
+      if (!AllUsedHeaders.contains(AltUpper) &&
+          !AllUsedHeaders.contains(AltLower)) {
         if (DbgLog)
           log("(PCH) file {0} doesn't affect any PCHs", NormFile);
-        return;
+        return false;
       }
     }
+  }
+
+  std::string Entry = Force ? ("*" + NormFile) : NormFile;
+  if (Immediate) {
+    {
+      std::lock_guard<std::mutex> Lock(ChangedMtx);
+      llvm::erase_if(Changed, [&](const std::string &Pending) {
+        StringRef S(Pending);
+        if (S.starts_with("*"))
+          S = S.drop_front(1);
+        return S == NormFile;
+      });
+    }
+    unsigned Invalidated = invalidateAffectedPCH({Entry}, FS);
+    if (Invalidated > 0) {
+      PCHQueue::Task T([this, Invalidated, FS = std::move(FS)]() mutable {
+        rebuildInvalidatedPCH(Invalidated, FS);
+        updateAllHeaders();
+      });
+      T.ThreadPri = llvm::ThreadPriority::Default;
+      Queue.push(std::move(T));
+      return true;
+    }
+    // Even if Invalidated == 0 (e.g. parent item is currently in State::Rebuild
+    // mid-flight from an earlier trigger), enqueue a follow-up check so the
+    // latest saved/VFS state is verified after the in-flight wave completes.
+    if (Force) {
+      enqueue({std::move(Entry)}, std::move(FS));
+      return true;
+    }
+    return false;
   }
 
   {
     std::lock_guard<std::mutex> Lock(ChangedMtx);
     ChangedLastTime = std::chrono::steady_clock::now();
-    if (Force) {
-      std::string Marked = "*";
-      Marked += NormFile;
-      Changed.push_back(std::move(Marked));
-    } else {
-      Changed.push_back(std::move(NormFile));
-    }
+    Changed.push_back(std::move(Entry));
     ChangedFS = std::move(FS);
   }
   ChangedCV.notify_one();
+  return true;
+}
+
+bool PCHManager::blockUntilIdle(Deadline D) const {
+  std::vector<std::string> Pending;
+  FSType PendingFS;
+  {
+    std::lock_guard<std::mutex> Lock(ChangedMtx);
+    if (!Changed.empty()) {
+      Pending = std::move(Changed);
+      Changed.clear();
+      PendingFS = std::move(ChangedFS);
+      ChangedFS = nullptr;
+    }
+  }
+  if (!Pending.empty())
+    const_cast<PCHManager *>(this)->enqueue(std::move(Pending),
+                                            std::move(PendingFS));
+  if (!Queue.blockUntilIdle(D))
+    return false;
+  return CacheWritePool.wait(D);
 }
 
 void PCHManager::updateAllHeaders() {
@@ -392,82 +466,119 @@ PCHManager::announcedPCHTask(std::vector<PCHSpec> AnnouncedPCHs) {
 
 void PCHManager::analyzePCHDependencies(std::vector<PCHSpec> PCHSpecs) {
   {
-    uniq_lck DynLoc(DynamicPCHLock);
-    DynamicPCHs.clear();
-  }
-
-  {
     shared_lck ReadAccessToPCH(PCHLock);
     for (auto &I : PCHs)
       I->invalidate();
   }
 
-  uniq_lck ExclusiveAccessToPCH(PCHLock);
-  PCHs.clear();
-  StaticPCHMap.clear();
-  PCHs.reserve(PCHSpecs.size());
+  {
+    uniq_lck ExclusiveAccessToPCH(PCHLock);
+    PCHs.clear();
+    StaticPCHMap.clear();
+    PCHs.reserve(PCHSpecs.size());
 
-  // 1. Partition PCHs with no parent dependency.
-  auto NoDepIt = std::partition(PCHSpecs.begin(), PCHSpecs.end(),
-                                [](const PCHSpec &S) {
-                                  return S.ParentPCHHeader.empty();
-                                });
-  for (auto J = PCHSpecs.begin(); J != NoDepIt; ++J) {
-    auto Item = std::make_shared<PCHItem>(std::move(*J));
-    StaticPCHMap[normalizeKey(Item->Spec.PCHHeader)] = Item;
-    PCHs.push_back(std::move(Item));
-  }
-
-  // 2. Iteratively link dependent levels.
-  auto PartBeg = NoDepIt;
-  auto End = PCHSpecs.end();
-  while (PartBeg != End) {
-    auto NewPartEnd =
-        std::partition(PartBeg, End, [&](const PCHSpec &S) {
-          return StaticPCHMap.contains(normalizeKey(S.ParentPCHHeader));
-        });
-    if (NewPartEnd == PartBeg) {
-      // Unresolved cycle or missing parent: emit remaining as root PCHs to avoid
-      // infinite loop.
-      for (auto J = PartBeg; J != End; ++J) {
-        auto Item = std::make_shared<PCHItem>(std::move(*J));
-        StaticPCHMap[normalizeKey(Item->Spec.PCHHeader)] = Item;
-        PCHs.push_back(std::move(Item));
-      }
-      break;
-    }
-
-    for (auto J = PartBeg; J != NewPartEnd; ++J) {
-      std::string ParentKey = normalizeKey(J->ParentPCHHeader);
+    // 1. Partition PCHs with no parent dependency.
+    auto NoDepIt = std::partition(PCHSpecs.begin(), PCHSpecs.end(),
+                                  [](const PCHSpec &S) {
+                                    return S.ParentPCHHeader.empty();
+                                  });
+    for (auto J = PCHSpecs.begin(); J != NoDepIt; ++J) {
       auto Item = std::make_shared<PCHItem>(std::move(*J));
-      if (auto DepIt = StaticPCHMap.find(ParentKey);
-          DepIt != StaticPCHMap.end()) {
-        DepIt->second->DependOnMe.push_back(Item);
-        Item->IdependOn.push_back(DepIt->second);
-      }
       StaticPCHMap[normalizeKey(Item->Spec.PCHHeader)] = Item;
       PCHs.push_back(std::move(Item));
     }
-    PartBeg = NewPartEnd;
+
+    // 2. Iteratively link dependent levels.
+    auto PartBeg = NoDepIt;
+    auto End = PCHSpecs.end();
+    while (PartBeg != End) {
+      auto NewPartEnd =
+          std::partition(PartBeg, End, [&](const PCHSpec &S) {
+            return StaticPCHMap.contains(normalizeKey(S.ParentPCHHeader));
+          });
+      if (NewPartEnd == PartBeg) {
+        // Unresolved cycle or missing parent: emit remaining as root PCHs to
+        // avoid infinite loop.
+        for (auto J = PartBeg; J != End; ++J) {
+          auto Item = std::make_shared<PCHItem>(std::move(*J));
+          StaticPCHMap[normalizeKey(Item->Spec.PCHHeader)] = Item;
+          PCHs.push_back(std::move(Item));
+        }
+        break;
+      }
+
+      for (auto J = PartBeg; J != NewPartEnd; ++J) {
+        std::string ParentKey = normalizeKey(J->ParentPCHHeader);
+        auto Item = std::make_shared<PCHItem>(std::move(*J));
+        if (auto DepIt = StaticPCHMap.find(ParentKey);
+            DepIt != StaticPCHMap.end()) {
+          DepIt->second->DependOnMe.push_back(Item);
+          Item->IdependOn.push_back(DepIt->second);
+        }
+        StaticPCHMap[normalizeKey(Item->Spec.PCHHeader)] = Item;
+        PCHs.push_back(std::move(Item));
+      }
+      PartBeg = NewPartEnd;
+    }
+  }
+
+  // Re-link any active dynamic PCHs onto the updated static PCH hierarchy so
+  // rescanning compile_commands / stdafx never drops open headers' PCHs.
+  uniq_lck DynLock(DynamicPCHLock);
+  shared_lck ReadPCH(PCHLock);
+  for (auto It = DynamicPCHs.begin(); It != DynamicPCHs.end();) {
+    auto &DynItem = It->second;
+    auto NewSpec = CDB.getPCHSpec(DynItem->Spec.PCHHeader);
+    if (!NewSpec || !NewSpec->IsDynamic) {
+      DynamicPCHs.erase(It++);
+      continue;
+    }
+    DynItem->IdependOn.clear();
+    DynItem->Spec = std::move(*NewSpec);
+    if (!DynItem->Spec.ParentPCHHeader.empty()) {
+      if (auto PIt =
+              StaticPCHMap.find(normalizeKey(DynItem->Spec.ParentPCHHeader));
+          PIt != StaticPCHMap.end()) {
+        DynItem->IdependOn.push_back(PIt->second);
+        uniq_lck ParentLock(PIt->second->Lock);
+        llvm::erase_if(PIt->second->DependOnMe,
+                       [](const weak_pch_item &W) { return W.expired(); });
+        PIt->second->DependOnMe.push_back(DynItem);
+      }
+    }
+    DynItem->invalidate();
+    ++It;
   }
 }
 
 unsigned PCHManager::PCHItem::invalidate() {
   unsigned Res = 0;
+  std::vector<shared_pch_item> Children;
   {
     uniq_lck FullLock(Lock);
-    if (ItemState != PCHItem::State::Rebuild) {
+    setSnapshot(nullptr);
+    if (ItemState.load(std::memory_order_relaxed) != PCHItem::State::Rebuild) {
       ++Res;
-      ItemState = PCHItem::State::Rebuild;
+      ItemState.store(PCHItem::State::Rebuild, std::memory_order_release);
       ++Version;
     }
+    Children.reserve(DependOnMe.size());
+    size_t WriteIdx = 0;
+    for (size_t ReadIdx = 0; ReadIdx < DependOnMe.size(); ++ReadIdx) {
+      if (auto D = DependOnMe[ReadIdx].lock()) {
+        Children.push_back(std::move(D));
+        if (WriteIdx != ReadIdx)
+          DependOnMe[WriteIdx] = std::move(DependOnMe[ReadIdx]);
+        ++WriteIdx;
+      }
+    }
+    DependOnMe.resize(WriteIdx);
   }
+  CV.notify_all();
 
   if (Res) {
-    for (auto &Dep : DependOnMe) {
-      if (auto D = Dep.lock())
-        Res += D->invalidate();
-    }
+    for (auto &Child : Children)
+      Res += Child->invalidate();
   }
   return Res;
 }
@@ -479,6 +590,7 @@ PCHManager::PCHItem::IncFileState::IncFileState(const llvm::vfs::Status &S)
 
 bool PCHManager::PCHItem::IncFileState::compare(StringRef Path,
                                                 const llvm::vfs::Status &S,
+                                                llvm::vfs::FileSystem &VFS,
                                                 bool CheckMD5) {
   if (Size != S.getSize())
     return false;
@@ -486,8 +598,10 @@ bool PCHManager::PCHItem::IncFileState::compare(StringRef Path,
       llvm::sys::toTimePoint(llvm::sys::toTimeT(S.getLastModificationTime()));
   if (ModTime != TModTime) {
     if (CheckMD5 && MD5 != llvm::MD5::MD5Result{}) {
-      if (auto TMD5 = llvm::sys::fs::md5_contents(Path)) {
-        if (*TMD5 != MD5) {
+      if (auto Buf = VFS.getBufferForFile(Path)) {
+        auto TMD5 = llvm::MD5::hash(
+            llvm::arrayRefFromStringRef((*Buf)->getBuffer()));
+        if (TMD5 != MD5) {
           if (DbgLog)
             log("(PCH) MD5 changed for {0}", Path);
           return false;
@@ -506,18 +620,9 @@ bool PCHManager::PCHItem::isAnyIncludeStateDifferent(FSType &VFS,
                                                      PathRef SourceRoot) {
   for (auto &[Path, State] : IncludeStates) {
     bool CheckMD5 = isWorkspaceHeader(Path, WorkspaceRoot, SourceRoot);
-    auto Status = VFS->status(Path);
-    if (!Status &&
-        llvm::sys::path::is_style_windows(llvm::sys::path::Style::native)) {
-      std::string Alt = normalizePathDriveLetter(Path, true);
-      Status = VFS->status(Alt);
-      if (!Status) {
-        Alt = normalizePathDriveLetter(Path, false);
-        Status = VFS->status(Alt);
-      }
-    }
+    auto Status = statusWithDriveFallback(*VFS, Path);
     if (Status) {
-      if (!State.compare(Path, *Status, CheckMD5)) {
+      if (!State.compare(Path, *Status, *VFS, CheckMD5)) {
         if (DbgLog)
           elog("(PCH) Include state changed for {0}", Path);
         return true;
@@ -532,18 +637,9 @@ bool PCHManager::PCHItem::isIncludeStateDifferent(StringRef Path, FSType &VFS,
   auto It = IncludeStates.find(Path);
   if (It == IncludeStates.end())
     return false;
-  auto Status = VFS->status(Path);
-  if (!Status &&
-      llvm::sys::path::is_style_windows(llvm::sys::path::Style::native)) {
-    std::string Alt = normalizePathDriveLetter(Path, true);
-    Status = VFS->status(Alt);
-    if (!Status) {
-      Alt = normalizePathDriveLetter(Path, false);
-      Status = VFS->status(Alt);
-    }
-  }
+  auto Status = statusWithDriveFallback(*VFS, Path);
   if (Status)
-    return !It->getValue().compare(Path, *Status, CheckMD5);
+    return !It->getValue().compare(Path, *Status, *VFS, CheckMD5);
   return true;
 }
 
@@ -552,13 +648,15 @@ void PCHManager::PCHItem::updateIncludeStates(FSType &VFS,
                                               PathRef SourceRoot) {
   IncludeStates.clear();
   auto Record = [&](StringRef IncPath) {
-    if (auto S = VFS->status(IncPath)) {
+    if (auto S = statusWithDriveFallback(*VFS, IncPath)) {
       auto [It, Inserted] = IncludeStates.insert_or_assign(IncPath, *S);
-      if (isWorkspaceHeader(IncPath, WorkspaceRoot, SourceRoot)) {
-        if (auto Hash = llvm::sys::fs::md5_contents(IncPath))
-          It->second.MD5 = *Hash;
-        else {
-          (void)Hash.getError();
+      bool InWS = isWorkspaceHeader(IncPath, WorkspaceRoot, SourceRoot);
+      It->second.IsWorkspace = InWS;
+      if (InWS) {
+        if (auto Buf = VFS->getBufferForFile(IncPath)) {
+          It->second.MD5 =
+              llvm::MD5::hash(llvm::arrayRefFromStringRef((*Buf)->getBuffer()));
+        } else {
           It->second.MD5 = {};
         }
       } else {
@@ -593,7 +691,8 @@ PCHManager::invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles,
     shared_lck SharedPCH(PCHLock);
     for (auto &UI : PCHs) {
       PCHItem &Item = *UI;
-      if (Item.ItemState == PCHItem::State::Rebuild)
+      if (Item.ItemState.load(std::memory_order_acquire) ==
+          PCHItem::State::Rebuild)
         continue;
 
       std::string SRoot;
@@ -625,11 +724,13 @@ PCHManager::invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles,
     shared_lck DynLock(DynamicPCHLock);
     for (auto &Entry : DynamicPCHs) {
       PCHItem &Item = *Entry.second;
-      if (Item.ItemState == PCHItem::State::Rebuild)
+      if (Item.ItemState.load(std::memory_order_acquire) ==
+          PCHItem::State::Rebuild)
         continue;
 
       if (!Item.IdependOn.empty() &&
-          Item.IdependOn[0]->ItemState == PCHItem::State::Rebuild) {
+          Item.IdependOn[0]->ItemState.load(std::memory_order_acquire) ==
+              PCHItem::State::Rebuild) {
         Invalidated += Item.invalidate();
         continue;
       }
@@ -659,7 +760,7 @@ PCHManager::invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles,
 
 std::optional<PCHManager::PCHItem::IncFileState>
 PCHManager::PCHItem::IncFileState::read(StringRef &Data) {
-  constexpr size_t Needed = 8 + 8 + sizeof(MD5);
+  constexpr size_t Needed = 8 + 8 + 1 + sizeof(MD5);
   if (Data.size() < Needed)
     return std::nullopt;
   IncFileState Res;
@@ -668,6 +769,8 @@ PCHManager::PCHItem::IncFileState::read(StringRef &Data) {
   uint64_t UnixTime = llvm::support::endian::read64le(Data.data());
   Data = Data.drop_front(8);
   Res.ModTime = llvm::sys::toTimePoint(UnixTime);
+  Res.IsWorkspace = Data[0] != 0;
+  Data = Data.drop_front(1);
   std::memcpy(Res.MD5.data(), Data.data(), sizeof(Res.MD5));
   Data = Data.drop_front(sizeof(Res.MD5));
   return Res;
@@ -676,9 +779,10 @@ PCHManager::PCHItem::IncFileState::read(StringRef &Data) {
 void PCHManager::PCHItem::IncFileState::write(llvm::raw_ostream &OS) const {
   uint64_t Sz = Size;
   uint64_t UnixEpoch = llvm::sys::toTimeT(ModTime);
-  char Buf[16];
+  char Buf[17];
   llvm::support::endian::write64le(Buf, Sz);
   llvm::support::endian::write64le(Buf + 8, UnixEpoch);
+  Buf[16] = IsWorkspace ? 1 : 0;
   OS.write(Buf, sizeof(Buf));
   OS.write(reinterpret_cast<const char *>(MD5.data()), sizeof(MD5));
 }
@@ -688,11 +792,17 @@ bool PCHManager::tryAddDynamicPCH(PathRef File, FSType FS) {
   if (!Spec || !Spec->IsDynamic)
     return false;
 
+  if (!Initialized.load(std::memory_order_acquire)) {
+    shared_lck Lock(PCHLock);
+    InitCV.wait(Lock,
+                [&] { return Initialized.load(std::memory_order_acquire); });
+  }
+
   std::string Key = normalizeKey(File);
   {
     uniq_lck Lock(DynamicPCHLock);
     if (auto It = DynamicPCHs.find(Key); It != DynamicPCHs.end()) {
-      It->second->LastUsedSeq = ++DynamicUseSeq;
+      It->second->LastUsedSeq.store(++DynamicUseSeq, std::memory_order_relaxed);
       return true;
     }
   }
@@ -708,17 +818,20 @@ bool PCHManager::tryAddDynamicPCH(PathRef File, FSType FS) {
   {
     uniq_lck Lock(DynamicPCHLock);
     if (auto It = DynamicPCHs.find(Key); It != DynamicPCHs.end()) {
-      It->second->LastUsedSeq = ++DynamicUseSeq;
+      It->second->LastUsedSeq.store(++DynamicUseSeq, std::memory_order_relaxed);
       return true;
     }
 
     auto Item = std::make_shared<PCHItem>(std::move(*Spec));
     if (ParentItem) {
       Item->IdependOn.push_back(ParentItem);
+      uniq_lck ParentLock(ParentItem->Lock);
+      llvm::erase_if(ParentItem->DependOnMe,
+                     [](const weak_pch_item &W) { return W.expired(); });
       ParentItem->DependOnMe.push_back(Item);
     }
     Item->Dynamic = true;
-    Item->LastUsedSeq = ++DynamicUseSeq;
+    Item->LastUsedSeq.store(++DynamicUseSeq, std::memory_order_relaxed);
     DynamicPCHs[Key] = Item;
 
     if (DbgLog)
@@ -751,8 +864,9 @@ void PCHManager::evictDynamicPCHsIfNeeded() {
     auto OldestIt = DynamicPCHs.end();
     uint64_t MinSeq = std::numeric_limits<uint64_t>::max();
     for (auto It = DynamicPCHs.begin(); It != DynamicPCHs.end(); ++It) {
-      if (It->second->LastUsedSeq < MinSeq) {
-        MinSeq = It->second->LastUsedSeq;
+      uint64_t Seq = It->second->LastUsedSeq.load(std::memory_order_relaxed);
+      if (Seq < MinSeq) {
+        MinSeq = Seq;
         OldestIt = It;
       }
     }
@@ -794,6 +908,11 @@ void PCHManager::makeSnapshot(const shared_pch_item &Item,
                      llvm::MemoryBuffer::getMemBuffer(B->getBuffer(), "", false));
     }
   }
+
+  for (const auto &[Path, St] : Item->IncludeStates) {
+    if (St.IsWorkspace)
+      Snap->WorkspaceIncludeSizes[Path] = St.Size;
+  }
 }
 
 uint64_t PCHManager::computeCommandHash(const tooling::CompileCommand &Cmd) {
@@ -808,7 +927,7 @@ uint64_t PCHManager::computeCommandHash(const tooling::CompileCommand &Cmd) {
 
 PPSkipIncludes::PPSkipIncludes(SourceManager &SM, StringRef TargetFile,
                                bool SkipTarget)
-    : Target(TargetFile.str()), TargetNorm(normalizeKey(TargetFile)),
+    : SM(SM), Target(TargetFile.str()), TargetNorm(normalizeKey(TargetFile)),
       SkipTarget(SkipTarget) {
   if (auto E = SM.getFileManager().getFileRef(Target))
     TargetRef = *E;
@@ -823,72 +942,74 @@ bool PPSkipIncludes::InclusionAllowed(
     return false;
 
   if (File) {
+    std::string ResolvedPath = resolveFileEntryNormalized(SM, *File);
     bool IsTarget = TargetRef && (*TargetRef == *File);
-    if (!IsTarget) {
-      StringRef Real = File->getFileEntry().tryGetRealPathName();
-      if (!Real.empty() && pathEqual(normalizeKey(Real), TargetNorm))
-        IsTarget = true;
+    if (!IsTarget && !ResolvedPath.empty() &&
+        pathEqual(ResolvedPath, TargetNorm)) {
+      IsTarget = true;
     }
     if (IsTarget) {
       Skipped = true;
-      if (!SkipTarget)
-        AllowedIncludes.insert(
-            File->getFileEntry().tryGetRealPathName().str());
+      if (!SkipTarget && !ResolvedPath.empty())
+        AllowedIncludes.insert(ResolvedPath);
       return !SkipTarget;
     }
-    AllowedIncludes.insert(File->getFileEntry().tryGetRealPathName().str());
+    if (!ResolvedPath.empty())
+      AllowedIncludes.insert(ResolvedPath);
   }
   return true;
 }
 
-void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
+bool PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   auto &Item = *ShItem;
   auto S = PCHItem::State::Invalid;
+  uniq_lck ThisItemFullLock(Item.Lock);
   llvm::scope_exit OnExit([&] {
+    Item.ItemState.store(S, std::memory_order_release);
+    if (ThisItemFullLock.owns_lock())
+      ThisItemFullLock.unlock();
+    Item.CV.notify_all();
     if (OnProgress)
       OnProgress(Stats{++Complete, Total});
-    {
-      // Ensure state is published while holding nothing extra, then notify.
-      Item.ItemState = S;
-    }
-    Item.CV.notify_all();
-    OnPCHBuilt.broadcast(
-        PCHEvent{Item.Spec.PCHHeader, S == PCHItem::State::Valid});
   });
 
-  uniq_lck ThisItemFullLock(Item.Lock);
   shared_pch_item Dep;
   if (!Item.IdependOn.empty())
     Dep = Item.IdependOn[0];
-
-  shared_lck DepReadLock = Dep ? shared_lck(Dep->Lock) : shared_lck{};
-  if (Dep && Dep->ItemState == PCHItem::State::Rebuild) {
-    if (DbgLog)
-      log("(PCH) {0} waiting for parent PCH {1}", Item.Spec.PCHHeader,
-          Dep->Spec.PCHHeader);
-    Dep->CV.wait(DepReadLock,
-                 [&] { return Dep->ItemState != PCHItem::State::Rebuild; });
-  }
-  if (Dep && Dep->ItemState != PCHItem::State::Valid) {
-    elog("(PCH) Cannot rebuild PCH for {0} because parent {1} is invalid",
-         Item.Spec.PCHHeader, Dep->Spec.PCHHeader);
-    return;
-  }
 
   PCHSnapshotPtr DepSnapshot;
   PCHSnapshotPtr NewSnapshot = std::make_shared<PCHSnapshot>();
   NewSnapshot->Filename = Item.Spec.PCHHeader;
   if (Dep) {
-    DepSnapshot = std::atomic_load(&Dep->PCHDatasSnapshot);
+    shared_lck DepReadLock(Dep->Lock);
+    if (Dep->ItemState.load(std::memory_order_acquire) ==
+        PCHItem::State::Rebuild) {
+      if (DbgLog)
+        log("(PCH) {0} waiting for parent PCH {1}", Item.Spec.PCHHeader,
+            Dep->Spec.PCHHeader);
+      Dep->CV.wait(DepReadLock, [&] {
+        return Dep->ItemState.load(std::memory_order_acquire) !=
+               PCHItem::State::Rebuild;
+      });
+    }
+    if (Dep->ItemState.load(std::memory_order_acquire) !=
+        PCHItem::State::Valid) {
+      elog("(PCH) Cannot rebuild PCH for {0} because parent {1} is invalid",
+           Item.Spec.PCHHeader, Dep->Spec.PCHHeader);
+      return false;
+    }
+
+    DepSnapshot = Dep->getSnapshot();
     if (!DepSnapshot) {
       elog("(PCH) Parent {0} has null snapshot for {1}", Dep->Spec.PCHHeader,
            Item.Spec.PCHHeader);
-      return;
+      return false;
     }
     NewSnapshot->PCHItems = DepSnapshot->PCHItems;
     NewSnapshot->PCHItems.push_back(Dep);
     NewSnapshot->UsedPCHDatasSnapshot = DepSnapshot->UsedPCHDatasSnapshot;
     NewSnapshot->UsedPCHDatasSnapshot.push_back(DepSnapshot->PCHData);
+    NewSnapshot->WorkspaceIncludeSizes = DepSnapshot->WorkspaceIncludeSizes;
   }
 
   tooling::CompileCommand BuildCC = Item.Spec.BuildCommand;
@@ -928,7 +1049,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   }
 
   auto OrigV = Item.Version;
-  if (!Item.Dynamic && !std::atomic_load(&Item.PCHDatasSnapshot) &&
+  if (!Item.Dynamic && !FS && !Item.getSnapshot() &&
       !PCHCachePath.empty() && llvm::sys::fs::exists(PCHCachePath)) {
     if (auto Buffer = llvm::MemoryBuffer::getFile(PCHCachePath)) {
       StringRef Data = (*Buffer)->getBuffer();
@@ -952,13 +1073,13 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
           NewSnapshot->PCHData = Item.PCHData;
           NewSnapshot->Version = Item.Version;
           makeSnapshot(ShItem, NewSnapshot);
-          std::atomic_store(&Item.PCHDatasSnapshot, NewSnapshot);
+          Item.setSnapshot(NewSnapshot);
           S = PCHItem::State::Valid;
           if (DbgLog)
             log("(PCH) Loaded cached PCH ({0} bytes) for {1}",
                 Item.PCHData ? Item.PCHData->getBufferSize() : 0,
                 Item.Spec.PCHHeader);
-          return;
+          return true;
         }
         if (DbgLog)
           log("(PCH) Cache invalid for {0}; rebuilding", Item.Spec.PCHHeader);
@@ -988,7 +1109,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   if (!Invocation) {
     elog("(PCH) Could not build CompilerInvocation for {0}",
          Item.Spec.PCHHeader);
-    return;
+    return false;
   }
 
   auto &PreprocessorOpts = Invocation->getPreprocessorOpts();
@@ -1060,7 +1181,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   Clang->setDiagnostics(&*PreambleDiagsEngine);
   if (!Clang->createTarget()) {
     elog("(PCH) Failed to create target for {0}", Item.Spec.PCHHeader);
-    return;
+    return false;
   }
   if (Clang->getFrontendOpts().Inputs.size() != 1 ||
       Clang->getFrontendOpts().Inputs[0].getKind().getFormat() !=
@@ -1068,7 +1189,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
       Clang->getFrontendOpts().Inputs[0].getKind().getLanguage() ==
           Language::LLVM_IR) {
     elog("(PCH) Bad inputs for {0}", Item.Spec.PCHHeader);
-    return;
+    return false;
   }
 
   Clang->createFileManager();
@@ -1084,7 +1205,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   SerializedDeclsCollector.BeforeExecute(*Clang);
   if (!Act->BeginSourceFile(*Clang, Clang->getFrontendOpts().Inputs[0])) {
     elog("(PCH) Failed to begin source file {0}", Item.Spec.PCHHeader);
-    return;
+    return false;
   }
   SerializedDeclsCollector.InitiateIncludeCollection(*Clang);
 
@@ -1106,16 +1227,17 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   if (llvm::Error Err = Act->Execute()) {
     elog("(PCH) Failure executing clang for {0}: {1}", Item.Spec.PCHHeader,
          llvm::toString(std::move(Err)));
-    return;
+    return false;
   }
 
   SerializedDeclsCollector.AfterExecute(*Clang);
   Act->EndSourceFile();
 
-  if (!Act->hasEmittedPreamblePCH()) {
+  if (!Act->hasEmittedPreamblePCH() || RawPCHBytes.empty() ||
+      PreambleDiagsEngine->hasFatalErrorOccurred()) {
     elog("(PCH) Failed to emit PCH for {0} (Version {1})", Item.Spec.PCHHeader,
          Item.Version);
-    return;
+    return false;
   }
 
   if (SkipCB && !SkipCB->wasSkipped()) {
@@ -1135,14 +1257,15 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
   NewSnapshot->PCHData = Item.PCHData;
   NewSnapshot->Version = Item.Version;
   makeSnapshot(ShItem, NewSnapshot);
-  std::atomic_store(&Item.PCHDatasSnapshot, NewSnapshot);
+  Item.setSnapshot(NewSnapshot);
   S = PCHItem::State::Valid;
 
   log("(PCH) Built {0}PCH of size {1} bytes for {2} (Version: {3})",
       Item.Dynamic ? "dynamic " : "", Item.PCHData->getBufferSize(),
       Item.Spec.PCHHeader, Item.Version);
 
-  if (!Item.Dynamic && !PCHCachePath.empty()) {
+  if (!Item.Dynamic && !FS && !PCHCachePath.empty() &&
+      !PreambleDiagsEngine->hasErrorOccurred()) {
     std::string Serialized;
     llvm::raw_string_ostream OS(Serialized);
     if (PCHItem::storeTo(OS, Item, CmdHash)) {
@@ -1174,6 +1297,7 @@ void PCHManager::rebuildPCH(shared_pch_item ShItem, FSType FS) {
           });
     }
   }
+  return true;
 }
 
 bool PCHManager::PCHItem::storeTo(llvm::raw_ostream &OS, const PCHItem &I,
@@ -1346,20 +1470,25 @@ void PCHManager::rebuildInvalidatedPCH(unsigned TotalCount, FSType FS) {
   {
     shared_lck Lock(PCHLock);
     for (const auto &I : PCHs) {
-      if (I->ItemState == PCHItem::State::Rebuild)
+      if (I->ItemState.load(std::memory_order_acquire) ==
+          PCHItem::State::Rebuild)
         ToRebuild.push_back(I);
     }
   }
   {
     shared_lck DynLock(DynamicPCHLock);
     for (const auto &Entry : DynamicPCHs) {
-      if (Entry.second->ItemState == PCHItem::State::Rebuild)
+      if (Entry.second->ItemState.load(std::memory_order_acquire) ==
+          PCHItem::State::Rebuild)
         ToRebuild.push_back(Entry.second);
     }
   }
 
   if (ToRebuild.empty())
     return;
+
+  std::mutex BuiltMu;
+  std::vector<std::string> BuiltPaths;
 
   unsigned NumWorkers =
       std::min<unsigned>(static_cast<unsigned>(ToRebuild.size()),
@@ -1368,17 +1497,23 @@ void PCHManager::rebuildInvalidatedPCH(unsigned TotalCount, FSType FS) {
   std::vector<std::thread> Workers;
   Workers.reserve(NumWorkers);
   for (unsigned W = 0; W < NumWorkers; ++W) {
-    Workers.emplace_back([this, &ToRebuild, &NextIdx, FS]() {
+    Workers.emplace_back([this, &ToRebuild, &NextIdx, FS, &BuiltMu, &BuiltPaths]() {
       while (true) {
         size_t Idx = NextIdx.fetch_add(1, std::memory_order_relaxed);
         if (Idx >= ToRebuild.size())
           break;
-        rebuildPCH(ToRebuild[Idx], FS);
+        if (rebuildPCH(ToRebuild[Idx], FS)) {
+          std::lock_guard<std::mutex> G(BuiltMu);
+          BuiltPaths.push_back(ToRebuild[Idx]->Spec.PCHHeader);
+        }
       }
     });
   }
   for (auto &T : Workers)
     T.join();
+
+  if (!BuiltPaths.empty())
+    OnPCHBuilt.broadcast(PCHEvent{std::move(BuiltPaths)});
 }
 
 PCHManager::PCHAccess
@@ -1462,17 +1597,21 @@ PCHManager::PCHAccess PCHManager::findDynPCH(PathRef PCHFile) const {
   if (!Res)
     return {};
 
-  Res->LastUsedSeq = ++DynamicUseSeq;
-  PCHSnapshotPtr Snap = std::atomic_load(&Res->PCHDatasSnapshot);
+  Res->LastUsedSeq.store(++DynamicUseSeq, std::memory_order_relaxed);
+  PCHSnapshotPtr Snap = Res->getSnapshot();
   if (!Snap) {
     shared_lck ItemLock(Res->Lock);
-    if (Res->ItemState == PCHItem::State::Rebuild) {
-      Res->CV.wait(ItemLock,
-                   [&] { return Res->ItemState != PCHItem::State::Rebuild; });
+    if (Res->ItemState.load(std::memory_order_acquire) ==
+        PCHItem::State::Rebuild) {
+      Res->CV.wait(ItemLock, [&] {
+        return Res->ItemState.load(std::memory_order_acquire) !=
+               PCHItem::State::Rebuild;
+      });
     }
-    if (Res->ItemState != PCHItem::State::Valid)
+    if (Res->ItemState.load(std::memory_order_acquire) !=
+        PCHItem::State::Valid)
       return {};
-    Snap = std::atomic_load(&Res->PCHDatasSnapshot);
+    Snap = Res->getSnapshot();
   }
   if (!Snap)
     return {};
@@ -1497,16 +1636,20 @@ PCHManager::PCHAccess PCHManager::findPCH(PathRef PCHFile) const {
   if (!Res)
     return {};
 
-  PCHSnapshotPtr Snap = std::atomic_load(&Res->PCHDatasSnapshot);
+  PCHSnapshotPtr Snap = Res->getSnapshot();
   if (!Snap) {
     shared_lck ItemLock(Res->Lock);
-    if (Res->ItemState == PCHItem::State::Rebuild) {
-      Res->CV.wait(ItemLock,
-                   [&] { return Res->ItemState != PCHItem::State::Rebuild; });
+    if (Res->ItemState.load(std::memory_order_acquire) ==
+        PCHItem::State::Rebuild) {
+      Res->CV.wait(ItemLock, [&] {
+        return Res->ItemState.load(std::memory_order_acquire) !=
+               PCHItem::State::Rebuild;
+      });
     }
-    if (Res->ItemState != PCHItem::State::Valid)
+    if (Res->ItemState.load(std::memory_order_acquire) !=
+        PCHItem::State::Valid)
       return {};
-    Snap = std::atomic_load(&Res->PCHDatasSnapshot);
+    Snap = Res->getSnapshot();
   }
   if (!Snap)
     return {};
@@ -1517,6 +1660,29 @@ PCHManager::PCHAccess PCHManager::findPCH(PathRef PCHFile) const {
 bool PCHManager::PCHAccess::addPCH(CompilerInvocation *CI, FSType &VFS) const {
   if (!ItemSnapshot)
     return false;
+
+  // Guard against reading stale PCHs when a workspace header changed size
+  // before invalidation completed (e.g., dirty overlay or rapid save/edit).
+  // With DisablePCHOrModuleValidation::PCH, Clang would otherwise read
+  // out-of-bounds SLocEntry offsets.
+  if (VFS) {
+    for (const auto &Entry : ItemSnapshot->WorkspaceIncludeSizes) {
+      StringRef HdrPath = Entry.first();
+      uint64_t ExpectedSize = Entry.second;
+      if (auto St = statusWithDriveFallback(*VFS, HdrPath)) {
+        if (static_cast<uint64_t>(St->getSize()) != ExpectedSize) {
+          elog("(PCH) Workspace header {0} size changed ({1} -> {2}) before "
+               "PCH {3} invalidated; skipping stale PCH",
+               HdrPath, ExpectedSize, St->getSize(), ItemSnapshot->Filename);
+          if (Manager)
+            Manager->checkChangedFile(HdrPath, VFS, /*Force=*/true,
+                                      /*Immediate=*/true);
+          return false;
+        }
+      }
+    }
+  }
+
   auto &PP = CI->getPreprocessorOpts();
   PP.AllowPCHWithCompilerErrors = true;
   PP.DisablePCHOrModuleValidation = DisableValidationForModuleKind::PCH;

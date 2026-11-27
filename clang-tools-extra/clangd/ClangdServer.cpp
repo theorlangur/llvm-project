@@ -297,16 +297,16 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
         std::make_unique<PCHManager>(CDB, TFS, *OwnedCallbacks, PCHOpts);
     PCHWasBuild =
         PrecompiledHeaderMgr->watch([this](const PCHManager::PCHEvent &E) {
-          vlog("PCH was built: {0}; Success: {1}", E.PCHPath, E.Success);
-          if (!E.Success)
+          if (E.BuiltPCHPaths.empty() || !WorkScheduler)
             return;
-          reparseOpenFilesIfNeeded([&](llvm::StringRef File) -> bool {
-            auto Cmd = this->CDB.getCompileCommand(File);
-            if (!Cmd)
-              return false;
-            return PrecompiledHeaderMgr->hasPCHInDependencies(File, *Cmd,
-                                                              E.PCHPath);
-          });
+          WorkScheduler->reparseAfterPCH(
+              [this, &E](PathRef File, const tooling::CompileCommand &Cmd) {
+                for (const std::string &P : E.BuiltPCHPaths) {
+                  if (PrecompiledHeaderMgr->hasPCHInDependencies(File, Cmd, P))
+                    return true;
+                }
+                return false;
+              });
         });
   }
 
@@ -370,6 +370,8 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
 }
 
 ClangdServer::~ClangdServer() {
+  // Disconnect PCH callbacks before tearing down TUScheduler.
+  PCHWasBuild = {};
   // Destroying TUScheduler first shuts down request threads that might
   // otherwise access members concurrently.
   // (Nobody can be using TUScheduler because we're on the main thread).
@@ -382,13 +384,15 @@ ClangdServer::~ClangdServer() {
       Mod.blockUntilIdle(Deadline::infinity());
   }
   BackgroundIdx.reset();
-  PCHWasBuild = {};
   PrecompiledHeaderMgr.reset();
 }
 
-void ClangdServer::checkChangedFile(PathRef File) {
-  if (PrecompiledHeaderMgr)
-    PrecompiledHeaderMgr->checkChangedFile(File, DraftMgr.asVFS());
+bool ClangdServer::checkChangedFile(PathRef File) {
+  if (!PrecompiledHeaderMgr)
+    return false;
+  auto FS = UseDirtyHeaders ? DraftMgr.asVFS() : TFS.view(std::nullopt);
+  return PrecompiledHeaderMgr->checkChangedFile(
+      File, std::move(FS), /*Force=*/false, /*Immediate=*/true);
 }
 
 std::optional<ParsedAST> ClangdServer::buildAST(PathRef File,
@@ -448,9 +452,10 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
   Opts.PreambleParseForwardingFunctions = PreambleParseForwardingFunctions;
   Opts.ImportInsertions = ImportInsertions;
 
-  auto DraftVFS = DraftMgr.asVFS();
+  IntrusiveRefCntPtr<llvm::vfs::FileSystem> DraftVFS =
+      UseDirtyHeaders ? DraftMgr.asVFS() : nullptr;
   if (PrecompiledHeaderMgr) {
-    if (Existed && AfterChange)
+    if (UseDirtyHeaders && Existed && AfterChange)
       PrecompiledHeaderMgr->checkChangedFile(File, DraftVFS);
     PrecompiledHeaderMgr->tryAddDynamicPCH(File, DraftVFS);
   }
@@ -1113,7 +1118,9 @@ void ClangdServer::onFileEvent(const DidChangeWatchedFilesParams &Params) {
   if (PrecompiledHeaderMgr) {
     auto FS = TFS.view(std::nullopt);
     for (const auto &Change : Params.changes)
-      PrecompiledHeaderMgr->checkChangedFile(Change.uri.file(), FS);
+      PrecompiledHeaderMgr->checkChangedFile(Change.uri.file(), FS,
+                                             /*Force=*/false,
+                                             /*Immediate=*/true);
   }
 }
 
@@ -1360,6 +1367,11 @@ ClangdServer::blockUntilIdleForTest(std::optional<double> TimeoutSeconds) {
     (*TimeoutSeconds) *= 10;
 #endif
 
+  // Wait for any pending PCH invalidations/builds before waiting on TUScheduler,
+  // since PCH completion can schedule reparses.
+  if (PrecompiledHeaderMgr &&
+      !PrecompiledHeaderMgr->blockUntilIdle(timeoutSeconds(TimeoutSeconds)))
+    return false;
   // Nothing else can schedule work on TUScheduler, because it's not threadsafe
   // and we're blocking the main thread.
   if (!WorkScheduler->blockUntilIdle(timeoutSeconds(TimeoutSeconds)))
@@ -1380,6 +1392,11 @@ ClangdServer::blockUntilIdleForTest(std::optional<double> TimeoutSeconds) {
   for (std::optional<double> Timeout :
        {TimeoutSeconds, TimeoutSeconds, std::optional<double>(0)}) {
     if (!CDB.blockUntilIdle(timeoutSeconds(Timeout)))
+      return false;
+    if (PrecompiledHeaderMgr &&
+        !PrecompiledHeaderMgr->blockUntilIdle(timeoutSeconds(Timeout)))
+      return false;
+    if (!WorkScheduler->blockUntilIdle(timeoutSeconds(Timeout)))
       return false;
     if (BackgroundIdx && !BackgroundIdx->blockUntilIdleForTest(Timeout))
       return false;

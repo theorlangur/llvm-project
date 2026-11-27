@@ -459,7 +459,8 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   CI->getFrontendOpts().DisableFree = false;
   if (PCH && *PCH) {
     Preamble = nullptr;
-    PCH->addPCH(CI.get(), VFS);
+    if (!PCH->addPCH(CI.get(), VFS))
+      PCH = nullptr;
   }
   const PrecompiledPreamble *PreamblePCH =
       Preamble ? &Preamble->Preamble : nullptr;
@@ -775,7 +776,7 @@ ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
   ASTDiags.EndSourceFile();
   if (PCH && *PCH && !ASTDiags.getModifiedASTFile().empty())
     PCH->getManager()->checkChangedFile(ASTDiags.getModifiedASTFile(), VFS,
-                                        /*Force=*/true);
+                                        /*Force=*/true, /*Immediate=*/true);
 
   std::vector<Diag> Diags = CompilerInvocationDiags;
   // FIXME: Also skip generation of diagnostics altogether to speed up ast

@@ -69,13 +69,14 @@ public:
   void append(std::vector<Task>);
   void work(std::function<void()> OnIdle = nullptr);
   void stop();
+  bool blockUntilIdle(Deadline D) const;
 
 private:
   void notifyProgress() const;
 
-  std::mutex Mu;
+  mutable std::mutex Mu;
   Stats Stat;
-  std::condition_variable CV;
+  mutable std::condition_variable CV;
   bool ShouldStop = false;
   std::vector<Task> Queue;
   std::function<void(Stats)> OnProgress;
@@ -99,6 +100,7 @@ class PCHManager {
     PCHDataType PCHData;
     std::vector<shared_pch_item> PCHItems;
     UsedPCHDataList UsedPCHDatasSnapshot;
+    llvm::StringMap<uint64_t> WorkspaceIncludeSizes;
     IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> MemFS;
   };
   using PCHSnapshotPtr = std::shared_ptr<PCHSnapshot>;
@@ -110,6 +112,7 @@ class PCHManager {
       size_t Size = 0;
       llvm::sys::TimePoint<> ModTime;
       llvm::MD5::MD5Result MD5{};
+      bool IsWorkspace = false;
 
       IncFileState() = default;
       IncFileState(const llvm::vfs::Status &S);
@@ -122,7 +125,7 @@ class PCHManager {
       }
 
       bool compare(StringRef Path, const llvm::vfs::Status &S,
-                   bool CheckMD5);
+                   llvm::vfs::FileSystem &VFS, bool CheckMD5);
 
       static std::optional<IncFileState> read(StringRef &Data);
       void write(llvm::raw_ostream &OS) const;
@@ -137,6 +140,15 @@ class PCHManager {
                                     PathRef SourceRoot);
     void updateIncludeStates(FSType &VFS, PathRef WorkspaceRoot,
                              PathRef SourceRoot);
+
+    PCHSnapshotPtr getSnapshot() const {
+      std::lock_guard<std::mutex> G(SnapshotMu);
+      return PCHDatasSnapshot;
+    }
+    void setSnapshot(PCHSnapshotPtr S) {
+      std::lock_guard<std::mutex> G(SnapshotMu);
+      PCHDatasSnapshot = std::move(S);
+    }
 
     static bool storeTo(llvm::raw_ostream &OS, const PCHItem &I,
                         uint64_t CommandHash);
@@ -157,14 +169,15 @@ class PCHManager {
     llvm::StringMap<IncFileState> IncludeStates;
     llvm::StringSet<> DynamicIncludes;
 
-    State ItemState = State::Rebuild;
+    std::atomic<State> ItemState{State::Rebuild};
     int Version = 0;
     bool Dynamic = false;
-    uint64_t LastUsedSeq = 0;
+    std::atomic<uint64_t> LastUsedSeq{0};
 
     mutable std::shared_timed_mutex Lock;
     mutable std::condition_variable_any CV;
-    mutable PCHSnapshotPtr PCHDatasSnapshot;
+    mutable std::mutex SnapshotMu;
+    PCHSnapshotPtr PCHDatasSnapshot;
   };
 
 public:
@@ -185,8 +198,7 @@ public:
   };
 
   struct PCHEvent {
-    PathRef PCHPath;
-    bool Success;
+    std::vector<std::string> BuiltPCHPaths;
   };
   using PCHBuiltEvent = Event<PCHEvent>;
 
@@ -225,7 +237,9 @@ public:
 
   std::optional<std::string> getPCHCacheDirFor(PathRef File) const;
 
-  void checkChangedFile(PathRef File, FSType FS, bool Force = false);
+  bool checkChangedFile(PathRef File, FSType FS, bool Force = false,
+                        bool Immediate = false);
+  bool blockUntilIdle(Deadline D) const;
 
   PCHAccess findPCH(PathRef File, const tooling::CompileCommand &Cmd) const;
   PCHAccess findPCH(PathRef PCHFile) const;
@@ -260,7 +274,7 @@ private:
                                  FSType FS);
   void rebuildInvalidatedPCH(unsigned Total, FSType FS);
   void updateAllHeaders();
-  void rebuildPCH(shared_pch_item Item, FSType FS);
+  bool rebuildPCH(shared_pch_item Item, FSType FS);
   void evictDynamicPCHsIfNeeded();
 
   static void makeSnapshot(const shared_pch_item &Item,
@@ -293,11 +307,11 @@ private:
   unsigned MaxConcurrency = 4;
   size_t MaxDynamicPCHs = 24;
 
-  std::mutex ChangedMtx;
-  std::condition_variable ChangedCV;
+  mutable std::mutex ChangedMtx;
+  mutable std::condition_variable ChangedCV;
   bool StopDebouncer = false;
-  std::vector<std::string> Changed;
-  FSType ChangedFS;
+  mutable std::vector<std::string> Changed;
+  mutable FSType ChangedFS;
   std::chrono::steady_clock::time_point ChangedLastTime;
 
   llvm::StringSet<> AllUsedHeaders;
@@ -309,7 +323,7 @@ private:
   mutable PCHBuiltEvent OnPCHBuilt;
 
   AsyncTaskRunner ThreadPool;
-  AsyncTaskRunner CacheWritePool;
+  mutable AsyncTaskRunner CacheWritePool;
   std::thread DebounceThread;
 
   // Must be declared last so CDB subscriptions disconnect before teardown.
@@ -318,6 +332,7 @@ private:
 };
 
 class PPSkipIncludes : public PPCallbacks {
+  SourceManager &SM;
   std::string Target;
   std::string TargetNorm;
   bool SkipTarget;

@@ -442,7 +442,7 @@ public:
     applyTweak(File, Sel, ID, "", std::move(CB));
   }
 
-  void checkChangedFile(PathRef File);
+  bool checkChangedFile(PathRef File);
   std::optional<ParsedAST> buildAST(PathRef File, StringRef Contents);
 
   /// Called when an event occurs for a watched file in the workspace.
