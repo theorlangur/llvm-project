@@ -563,6 +563,7 @@ void ClangdLSPServer::onInitialize(const InitializeParams &Params,
       UnityProjectCDB::Options UOpts;
       if (!Opts.UnityPCHConfig.empty())
         UOpts.ConfigPath = Opts.UnityPCHConfig;
+      UOpts.WorkspaceRoot = Opts.WorkspaceRoot;
       auto U = std::make_unique<UnityProjectCDB>(std::move(BaseCDB), TFS,
                                                  std::move(UOpts));
       UnityCDB = U.get();

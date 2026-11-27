@@ -684,85 +684,335 @@ UnityProjectCDB::UnityProjectCDB(
 UnityProjectCDB::ConfigOverrides
 UnityProjectCDB::loadConfig(PathRef SourceRoot) const {
   ConfigOverrides Out;
-  if (SourceRoot.empty() && !Opts.ConfigPath)
+  bool HasWorkspaceRoot = Opts.WorkspaceRoot && !Opts.WorkspaceRoot->empty();
+  bool HasExplicitConfig = Opts.ConfigPath && !Opts.ConfigPath->empty();
+  if (SourceRoot.empty() && !HasWorkspaceRoot && !HasExplicitConfig) {
+    log("(UnityCDB) Config: skipping config lookup (no source root, workspace "
+        "root, or --unity-pch-config)");
     return Out;
+  }
 
   auto FS = TFS.view(SourceRoot);
   std::string PathToRead;
-  if (Opts.ConfigPath && !Opts.ConfigPath->empty()) {
-    PathToRead = *Opts.ConfigPath;
-  } else {
-    for (StringRef Candidate : {"unity_pch.json", ".clangd-unity.json"}) {
-      std::string P = resolveRelativeTo(SourceRoot, Candidate);
-      if (FS->exists(P)) {
-        PathToRead = std::move(P);
-        break;
-      }
+  if (HasExplicitConfig) {
+    StringRef RawExplicit(*Opts.ConfigPath);
+    if (llvm::sys::path::is_absolute(RawExplicit)) {
+      PathToRead = normalizePath(RawExplicit);
+    } else if (HasWorkspaceRoot) {
+      std::string WsCand = resolveRelativeTo(*Opts.WorkspaceRoot, RawExplicit);
+      if (FS->exists(WsCand) || SourceRoot.empty())
+        PathToRead = std::move(WsCand);
+      else
+        PathToRead = resolveRelativeTo(SourceRoot, RawExplicit);
+    } else if (!SourceRoot.empty()) {
+      PathToRead = resolveRelativeTo(SourceRoot, RawExplicit);
+    } else {
+      PathToRead = normalizePath(RawExplicit);
     }
-  }
-  if (PathToRead.empty())
-  {
-    log("(UnityCDB) no config found.");
-    return Out;
+    log("(UnityCDB) Config: using explicit --unity-pch-config '{0}' "
+        "(resolved: '{1}')",
+        RawExplicit, PathToRead);
+    if (!FS->exists(PathToRead)) {
+      elog("(UnityCDB) Config: explicit config file '{0}' does not exist",
+           PathToRead);
+      return Out;
+    }
+  } else {
+    std::vector<std::string> SearchDirs;
+    auto AddSearchDir = [&](PathRef Dir) {
+      if (Dir.empty())
+        return;
+      std::string Norm = normalizePath(Dir);
+      if (llvm::none_of(SearchDirs, [&](const std::string &Existing) {
+            return pathEqual(Existing, Norm);
+          })) {
+        SearchDirs.push_back(std::move(Norm));
+      }
+    };
+    if (HasWorkspaceRoot)
+      AddSearchDir(*Opts.WorkspaceRoot);
+    if (!SourceRoot.empty()) {
+      AddSearchDir(SourceRoot);
+      StringRef Parent = llvm::sys::path::parent_path(SourceRoot);
+      if (!Parent.empty() && Parent != SourceRoot)
+        AddSearchDir(Parent);
+    }
+
+    std::vector<std::string> Probed;
+    for (const std::string &Dir : SearchDirs) {
+      for (StringRef Candidate : {"unity_pch.json", ".clangd-unity.json"}) {
+        std::string P = resolveRelativeTo(Dir, Candidate);
+        bool Exists = FS->exists(P);
+        Probed.push_back(P);
+        if (Exists) {
+          PathToRead = std::move(P);
+          break;
+        }
+      }
+      if (!PathToRead.empty())
+        break;
+    }
+
+    if (PathToRead.empty()) {
+      log("(UnityCDB) Config: no config file found (probed: {0})",
+          Probed.empty() ? std::string("<none>") : llvm::join(Probed, ", "));
+      return Out;
+    }
+    log("(UnityCDB) Config: discovered '{0}' (source root: '{1}', workspace "
+        "root: '{2}')",
+        PathToRead, SourceRoot.empty() ? StringRef("<none>") : SourceRoot,
+        HasWorkspaceRoot ? StringRef(*Opts.WorkspaceRoot) : StringRef("<none>"));
   }
 
-  log("(UnityCDB) config. Attempting to load from {0}", PathToRead);
+  log("(UnityCDB) Config: attempting to load '{0}'", PathToRead);
   auto Buf = FS->getBufferForFile(PathToRead);
-  if (!Buf)
-  {
-    elog("(UnityCDB) config: could not read");
+  if (!Buf) {
+    elog("(UnityCDB) Config: could not read '{0}': {1}", PathToRead,
+         Buf.getError().message());
     return Out;
   }
 
   auto Parsed = llvm::json::parse((*Buf)->getBuffer());
   if (!Parsed) {
-    elog("(UnityCDB) Failed to parse config {0}: {1}", PathToRead,
-         Parsed.takeError());
+    elog("(UnityCDB) Config: failed to parse JSON in '{0}': {1}", PathToRead,
+         llvm::toString(Parsed.takeError()));
     return Out;
   }
   const auto *Obj = Parsed->getAsObject();
-  if (!Obj)
-  {
-    elog("(UnityCDB) config: not root object found");
+  if (!Obj) {
+    elog("(UnityCDB) Config: root JSON value in '{0}' is not an object",
+         PathToRead);
     return Out;
   }
 
   Out.Loaded = true;
-  StringRef ConfigDir = llvm::sys::path::parent_path(PathToRead);
-  StringRef BaseDir = SourceRoot.empty() ? ConfigDir : SourceRoot;
+  Out.ConfigPath = PathToRead;
+  std::string ConfigDir = normalizePath(llvm::sys::path::parent_path(PathToRead));
+  unsigned Warnings = 0;
+
+  auto ResolveConfigPath = [&](StringRef RawPath) -> std::string {
+    if (llvm::sys::path::is_absolute(RawPath))
+      return normalizePath(RawPath);
+    std::string Cand = resolveRelativeTo(ConfigDir, RawPath);
+    if (FS->status(Cand))
+      return Cand;
+    if (HasWorkspaceRoot) {
+      std::string WsCand = resolveRelativeTo(*Opts.WorkspaceRoot, RawPath);
+      if (FS->status(WsCand)) {
+        log("(UnityCDB) Config '{0}': relative path '{1}' resolved against "
+            "workspace root -> '{2}'",
+            PathToRead, RawPath, WsCand);
+        return WsCand;
+      }
+    }
+    if (!SourceRoot.empty()) {
+      std::string SrCand = resolveRelativeTo(SourceRoot, RawPath);
+      if (FS->status(SrCand)) {
+        log("(UnityCDB) Config '{0}': relative path '{1}' resolved against "
+            "source root -> '{2}'",
+            PathToRead, RawPath, SrCand);
+        return SrCand;
+      }
+    }
+    return Cand;
+  };
+
+  for (const auto &KV : *Obj) {
+    StringRef K = KV.first;
+    if (K != "filter-in" && K != "filter-out" && K != "skip-deps" &&
+        K != "pch") {
+      ++Warnings;
+      elog("(UnityCDB) Config '{0}': unknown top-level key '{1}' (expected: "
+           "filter-in, filter-out, skip-deps, pch)",
+           PathToRead, K);
+    }
+  }
 
   auto ReadPathArray = [&](StringRef Key, std::vector<std::string> &Dest) {
-    if (const auto *Arr = Obj->getArray(Key)) {
-      for (const auto &V : *Arr) {
-        if (auto S = V.getAsString())
-          Dest.push_back(resolveRelativeTo(BaseDir, *S));
+    const auto *Val = Obj->get(Key);
+    if (!Val)
+      return;
+    const auto *Arr = Val->getAsArray();
+    if (!Arr) {
+      ++Warnings;
+      elog("(UnityCDB) Config '{0}': '{1}' must be an array of path strings",
+           PathToRead, Key);
+      return;
+    }
+    for (size_t Idx = 0; Idx < Arr->size(); ++Idx) {
+      auto S = (*Arr)[Idx].getAsString();
+      if (!S) {
+        ++Warnings;
+        elog("(UnityCDB) Config '{0}': '{1}[{2}]' must be a string",
+             PathToRead, Key, Idx);
+        continue;
       }
+      if (S->trim().empty()) {
+        ++Warnings;
+        elog("(UnityCDB) Config '{0}': '{1}[{2}]' is empty; ignoring to avoid "
+             "matching the entire base directory",
+             PathToRead, Key, Idx);
+        continue;
+      }
+      std::string Resolved = ResolveConfigPath(*S);
+      if (auto St = FS->status(Resolved)) {
+        log("(UnityCDB) Config '{0}': {1}[{2}] '{3}' -> '{4}' ({5})",
+            PathToRead, Key, Idx, *S, Resolved,
+            St->isDirectory() ? "dir" : "file");
+      } else {
+        ++Warnings;
+        elog("(UnityCDB) Config '{0}': '{1}[{2}]' path '{3}' (resolved: '{4}') "
+             "does not exist ({5})",
+             PathToRead, Key, Idx, *S, Resolved, St.getError().message());
+      }
+      Dest.push_back(std::move(Resolved));
     }
   };
   ReadPathArray("filter-in", Out.FilterIn);
   ReadPathArray("filter-out", Out.FilterOut);
-  if (const auto *Arr = Obj->getArray("skip-deps")) {
-    for (const auto &V : *Arr) {
-      if (auto S = V.getAsString())
-        Out.SkipDeps.push_back(S->str());
+
+  for (const std::string &InPath : Out.FilterIn) {
+    if (!Out.FilterOut.empty() && isInAnyAllowedDir(InPath, Out.FilterOut)) {
+      ++Warnings;
+      elog("(UnityCDB) Config '{0}': filter-in path '{1}' is shadowed by "
+           "filter-out (filter-out takes precedence)",
+           PathToRead, InPath);
     }
   }
-  if (const auto *Arr = Obj->getArray("pch")) {
-    for (const auto &V : *Arr) {
-      if (const auto *PObj = V.getAsObject()) {
-        if (auto FileStr = PObj->getString("file")) {
-          std::string Key = resolveRelativeTo(BaseDir, *FileStr);
-          if (const auto *AllowArr = PObj->getArray("allow-includes-from")) {
-            auto &Vec = Out.AllowIncludesFrom[Key];
-            for (const auto &AV : *AllowArr) {
-              if (auto AS = AV.getAsString())
-                Vec.push_back(resolveRelativeTo(BaseDir, *AS));
+
+  if (const auto *Val = Obj->get("skip-deps")) {
+    const auto *Arr = Val->getAsArray();
+    if (!Arr) {
+      ++Warnings;
+      elog("(UnityCDB) Config '{0}': 'skip-deps' must be an array of regex "
+           "strings",
+           PathToRead);
+    } else {
+      for (size_t Idx = 0; Idx < Arr->size(); ++Idx) {
+        auto S = (*Arr)[Idx].getAsString();
+        if (!S) {
+          ++Warnings;
+          elog("(UnityCDB) Config '{0}': 'skip-deps[{1}]' must be a string",
+               PathToRead, Idx);
+          continue;
+        }
+        if (S->trim().empty()) {
+          ++Warnings;
+          elog("(UnityCDB) Config '{0}': 'skip-deps[{1}]' is empty; ignoring",
+               PathToRead, Idx);
+          continue;
+        }
+        llvm::Regex TestRx(*S);
+        std::string RegErr;
+        if (!TestRx.isValid(RegErr)) {
+          ++Warnings;
+          elog("(UnityCDB) Config '{0}': invalid regex in 'skip-deps[{1}]' "
+               "('{2}'): {3}",
+               PathToRead, Idx, *S, RegErr);
+          continue;
+        }
+        log("(UnityCDB) Config '{0}': skip-deps[{1}] = '{2}'", PathToRead, Idx,
+            *S);
+        Out.SkipDeps.push_back(S->str());
+      }
+    }
+  }
+
+  if (const auto *Val = Obj->get("pch")) {
+    const auto *Arr = Val->getAsArray();
+    if (!Arr) {
+      ++Warnings;
+      elog("(UnityCDB) Config '{0}': 'pch' must be an array of objects",
+           PathToRead);
+    } else {
+      for (size_t Idx = 0; Idx < Arr->size(); ++Idx) {
+        const auto *PObj = (*Arr)[Idx].getAsObject();
+        if (!PObj) {
+          ++Warnings;
+          elog("(UnityCDB) Config '{0}': 'pch[{1}]' must be an object",
+               PathToRead, Idx);
+          continue;
+        }
+        for (const auto &PKV : *PObj) {
+          if (PKV.first != "file" && PKV.first != "allow-includes-from") {
+            ++Warnings;
+            elog("(UnityCDB) Config '{0}': unknown key '{1}' in 'pch[{2}]' "
+                 "(expected: file, allow-includes-from)",
+                 PathToRead, PKV.first.str(), Idx);
+          }
+        }
+        auto FileStr = PObj->getString("file");
+        if (!FileStr || FileStr->trim().empty()) {
+          ++Warnings;
+          elog("(UnityCDB) Config '{0}': 'pch[{1}].file' must be a non-empty "
+               "header path string",
+               PathToRead, Idx);
+          continue;
+        }
+        std::string Key = ResolveConfigPath(*FileStr);
+        if (auto St = FS->status(Key)) {
+          if (St->isDirectory()) {
+            ++Warnings;
+            elog("(UnityCDB) Config '{0}': 'pch[{1}].file' '{2}' (resolved: "
+                 "'{3}') is a directory, expected a header file",
+                 PathToRead, Idx, *FileStr, Key);
+          } else {
+            log("(UnityCDB) Config '{0}': pch[{1}].file '{2}' -> '{3}'",
+                PathToRead, Idx, *FileStr, Key);
+          }
+        } else {
+          ++Warnings;
+          elog("(UnityCDB) Config '{0}': 'pch[{1}].file' '{2}' (resolved: "
+               "'{3}') does not exist ({4})",
+               PathToRead, Idx, *FileStr, Key, St.getError().message());
+        }
+
+        if (const auto *AllowVal = PObj->get("allow-includes-from")) {
+          const auto *AllowArr = AllowVal->getAsArray();
+          if (!AllowArr) {
+            ++Warnings;
+            elog("(UnityCDB) Config '{0}': 'pch[{1}].allow-includes-from' must "
+                 "be an array of path strings",
+                 PathToRead, Idx);
+            continue;
+          }
+          auto &Vec = Out.AllowIncludesFrom[Key];
+          for (size_t AIdx = 0; AIdx < AllowArr->size(); ++AIdx) {
+            auto AS = (*AllowArr)[AIdx].getAsString();
+            if (!AS || AS->trim().empty()) {
+              ++Warnings;
+              elog("(UnityCDB) Config '{0}': "
+                   "'pch[{1}].allow-includes-from[{2}]' must be a non-empty "
+                   "string",
+                   PathToRead, Idx, AIdx);
+              continue;
             }
+            std::string AllowPath = ResolveConfigPath(*AS);
+            if (auto ASt = FS->status(AllowPath)) {
+              log("(UnityCDB) Config '{0}': pch[{1}].allow-includes-from[{2}] "
+                  "'{3}' -> '{4}' ({5})",
+                  PathToRead, Idx, AIdx, *AS, AllowPath,
+                  ASt->isDirectory() ? "dir" : "file");
+            } else {
+              ++Warnings;
+              elog("(UnityCDB) Config '{0}': "
+                   "'pch[{1}].allow-includes-from[{2}]' path '{3}' (resolved: "
+                   "'{4}') for PCH '{5}' does not exist ({6})",
+                   PathToRead, Idx, AIdx, *AS, AllowPath, Key,
+                   ASt.getError().message());
+            }
+            Vec.push_back(std::move(AllowPath));
           }
         }
       }
     }
   }
+
+  log("(UnityCDB) Config loaded from '{0}' (config dir: '{1}'): {2} "
+      "filter-in, {3} filter-out, {4} skip-deps, {5} pch entry/entries, {6} "
+      "warning(s)",
+      PathToRead, ConfigDir, Out.FilterIn.size(), Out.FilterOut.size(),
+      Out.SkipDeps.size(), Out.AllowIncludesFrom.size(), Warnings);
   return Out;
 }
 
@@ -802,13 +1052,19 @@ void UnityProjectCDB::scanFiles(llvm::ArrayRef<std::string> Files) {
   llvm::StringMap<UnityEntry *> StdafxToRepresentativeUnity;
   llvm::StringSet<> AllStdafxSet;
 
+  size_t TotalCppCandidates = 0;
+  size_t FilteredOutCandidates = 0;
+
   // Phase 1: Identify unity files among Files.
   for (const std::string &RawFile : Files) {
     if (!isCppImplExtension(RawFile))
       continue;
+    ++TotalCppCandidates;
     std::string NormFile = normalizePath(RawFile);
-    if (!ShouldProcess(NormFile))
+    if (!ShouldProcess(NormFile)) {
+      ++FilteredOutCandidates;
       continue;
+    }
 
     auto Cmd = Base->getCompileCommand(RawFile);
     if (!Cmd)
@@ -861,12 +1117,25 @@ void UnityProjectCDB::scanFiles(llvm::ArrayRef<std::string> Files) {
     UnityEntries.push_back(std::move(Entry));
   }
 
+  if (Cfg.Loaded) {
+    log("(UnityCDB) Config filter summary: {0}/{1} C++ TU(s) passed filters "
+        "({2} excluded)",
+        TotalCppCandidates - FilteredOutCandidates, TotalCppCandidates,
+        FilteredOutCandidates);
+    if (TotalCppCandidates > 0 && TotalCppCandidates == FilteredOutCandidates) {
+      elog("(UnityCDB) Config warning: all {0} C++ TU(s) in compilation "
+           "database were excluded by filter-in/filter-out in '{1}'",
+           TotalCppCandidates, Cfg.ConfigPath);
+    }
+  }
+
   // Record scanned root even if no unity files exist so ensureInitializedFor
   // does not repeatedly block on non-unity projects.
   if (UnityEntries.empty()) {
     bool FirstForRoot = false;
     {
       std::unique_lock<std::shared_mutex> Lock(Mu);
+      LoadedConfigPath = Cfg.ConfigPath;
       if (!SourceRoot.empty())
         FirstForRoot = KnownSourceRoots.insert(normalizePath(SourceRoot)).second;
     }
@@ -877,6 +1146,16 @@ void UnityProjectCDB::scanFiles(llvm::ArrayRef<std::string> Files) {
 
   for (UnityEntry &U : UnityEntries)
     StdafxToRepresentativeUnity.try_emplace(U.OwnerStdafx, &U);
+
+  if (Cfg.Loaded) {
+    for (const auto &Entry : Cfg.AllowIncludesFrom) {
+      if (!StdafxToRepresentativeUnity.contains(Entry.first())) {
+        elog("(UnityCDB) Config warning: 'pch' entry '{0}' in '{1}' did not "
+             "match any discovered unity umbrella header",
+             Entry.first(), Cfg.ConfigPath);
+      }
+    }
+  }
 
   // Compile skip-deps regexes once.
   std::vector<llvm::Regex> SkipRegexes;
@@ -1039,6 +1318,7 @@ void UnityProjectCDB::scanFiles(llvm::ArrayRef<std::string> Files) {
       TrackedUmbrellas.insert(S);
     if (!SourceRoot.empty())
       KnownSourceRoots.insert(normalizePath(SourceRoot));
+    LoadedConfigPath = Cfg.ConfigPath;
     for (const std::string &F : Files)
       LastScannedFiles.push_back(F);
     for (const PCHSpec &S : AnnouncedStaticPCHs) {
@@ -1078,7 +1358,10 @@ void UnityProjectCDB::notifyFileChanged(PathRef File) {
   std::vector<std::string> ToRescan;
   {
     std::shared_lock<std::shared_mutex> Lock(Mu);
-    if (!TrackedUmbrellas.contains(Norm) && !UnityToPCH.contains(Norm))
+    bool IsTrackedConfig =
+        !LoadedConfigPath.empty() && pathEqual(Norm, LoadedConfigPath);
+    if (!TrackedUmbrellas.contains(Norm) && !UnityToPCH.contains(Norm) &&
+        !IsTrackedConfig)
       return;
     ToRescan = LastScannedFiles;
   }

@@ -19,6 +19,7 @@
 #include "index/Index.h"
 #include "index/MemIndex.h"
 #include "index/Symbol.h"
+#include "support/Logger.h"
 #include "support/Path.h"
 #include "support/ThreadsafeFS.h"
 #include "llvm/ADT/ScopeExit.h"
@@ -754,6 +755,95 @@ TEST(UnityPCHTests, LowerLayerHeaderEditInvalidationAndSafety) {
   auto FreshVFS = TFS.view(CmdApp->Directory);
   EXPECT_FALSE(Access.addPCH(TestCI.get(), FreshVFS));
   EXPECT_TRUE(GuardMgr.blockUntilIdle(timeoutSeconds(30)));
+}
+
+TEST(UnityPCHTests, ConfigLoadingValidationAndOutOfSourceBuild) {
+  struct CapturingLogger : public Logger {
+    std::mutex Mu;
+    std::string Output;
+    void log(Level L, const char *,
+             const llvm::formatv_object_base &Message) override {
+      std::lock_guard<std::mutex> G(Mu);
+      Output += indicator(L);
+      Output += ": ";
+      Output += Message.str();
+      Output += '\n';
+    }
+  } CapLogger;
+  LoggingSession LogGuard(CapLogger);
+
+  TempDir Tmp("unity-config-val-test");
+  std::string BuildDir = Tmp.path("build");
+  std::string CoreStdafx = Tmp.path("src/core/stdafx.hpp");
+  std::string SharedHdr = Tmp.path("src/shared/common.hpp");
+  std::string CoreImpl = Tmp.path("src/core/impl.cpp");
+  std::string UnityCore = Tmp.path("src/unity_core.cpp");
+
+  writeFileText(SharedHdr, "#pragma once\ninline int shared_val() { return 5; }\n");
+  writeFileText(CoreStdafx,
+                "#pragma once\n#include \"shared/common.hpp\"\ninline int core_val() { return shared_val(); }\n");
+  writeFileText(CoreImpl, "int call_core() { return core_val(); }\n");
+  writeFileText(UnityCore,
+                "#include \"core/stdafx.hpp\"\n#include \"core/impl.cpp\"\n");
+
+  // Out-of-source compile_commands.json in build/, while unity_pch.json is in
+  // the parent workspace root.
+  llvm::json::Array DB;
+  DB.push_back(llvm::json::Object{
+      {"directory", BuildDir},
+      {"command", "clang++ -std=c++20 -I" + Tmp.path("src") + " -c " + UnityCore},
+      {"file", UnityCore},
+  });
+  writeFileText(BuildDir + "/compile_commands.json",
+                llvm::formatv("{0:2}", llvm::json::Value(std::move(DB))).str());
+
+  std::string MissingUmbrella = Tmp.path("src/missing/stdafx.hpp");
+  std::string MissingFilterDir = Tmp.path("nonexistent_dir");
+  writeFileText(Tmp.path("unity_pch.json"), R"json({
+  "unknown-key": 123,
+  "filter-in": ["src/", "nonexistent_dir/"],
+  "filter-out": [""],
+  "skip-deps": ["[unclosed"],
+  "pch": [
+    {
+      "file": "src/core/stdafx.hpp",
+      "allow-includes-from": ["src/shared"]
+    },
+    {
+      "file": "src/missing/stdafx.hpp",
+      "allow-includes-from": ["src/missing_inc"]
+    }
+  ]
+})json");
+
+  RealThreadsafeFS TFS;
+  DirectoryBasedGlobalCompilationDatabase::Options CDBOpts(TFS);
+  CDBOpts.CompileCommandsDir = BuildDir;
+  auto BaseCDB =
+      std::make_unique<DirectoryBasedGlobalCompilationDatabase>(CDBOpts);
+  UnityProjectCDB UnityCDB(std::move(BaseCDB), TFS);
+
+  // Trigger discovery and verify valid config entries work (shared/common.hpp
+  // is allowed via pch[0].allow-includes-from and empty "" in filter-out
+  // was ignored rather than excluding the whole repo).
+  auto SharedSpec = UnityCDB.getPCHSpec(SharedHdr);
+  ASSERT_TRUE(SharedSpec.has_value());
+  EXPECT_TRUE(SharedSpec->IsDynamic);
+  EXPECT_EQ(SharedSpec->UmbrellaHeader, CoreStdafx);
+
+  std::string Logs;
+  {
+    std::lock_guard<std::mutex> G(CapLogger.Mu);
+    Logs = CapLogger.Output;
+  }
+  EXPECT_THAT(Logs, testing::HasSubstr("Config: discovered"));
+  EXPECT_THAT(Logs, testing::HasSubstr("unknown top-level key 'unknown-key'"));
+  EXPECT_THAT(Logs, testing::HasSubstr("filter-in[1]"));
+  EXPECT_THAT(Logs, testing::HasSubstr("does not exist"));
+  EXPECT_THAT(Logs, testing::HasSubstr("'filter-out[0]' is empty"));
+  EXPECT_THAT(Logs, testing::HasSubstr("invalid regex in 'skip-deps[0]'"));
+  EXPECT_THAT(Logs, testing::HasSubstr("did not match any discovered unity umbrella header"));
+  EXPECT_THAT(Logs, testing::HasSubstr("Config filter summary: 1/1 C++ TU(s) passed filters"));
 }
 
 } // namespace

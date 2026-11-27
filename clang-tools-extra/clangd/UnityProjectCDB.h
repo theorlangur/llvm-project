@@ -34,6 +34,7 @@ public:
   struct Options {
     bool Enabled = true;
     std::optional<std::string> ConfigPath;
+    std::optional<std::string> WorkspaceRoot;
   };
 
   UnityProjectCDB(
@@ -91,6 +92,7 @@ private:
   };
 
   struct ConfigOverrides {
+    std::string ConfigPath;
     std::vector<std::string> FilterIn;
     std::vector<std::string> FilterOut;
     std::vector<std::string> SkipDeps;
@@ -118,6 +120,7 @@ private:
   llvm::StringSet<> KnownSourceRoots;            // roots already scanned
   std::vector<std::string> LastScannedFiles;     // for live re-scan on edits
   std::vector<PCHSpec> LastAnnouncedStaticPCHs;  // cached for late listeners
+  std::string LoadedConfigPath;                  // for live config reload
 
   // Must be declared last so subscription disconnects before member teardown.
   CommandChanged::Subscription BaseChanged;
