@@ -275,11 +275,18 @@ UnityProjectCDB::loadConfig(PathRef SourceRoot) const {
     }
   }
   if (PathToRead.empty())
+  {
+    log("(UnityCDB) no config found.");
     return Out;
+  }
 
+  log("(UnityCDB) config. Attempting to load from {0}", PathToRead);
   auto Buf = FS->getBufferForFile(PathToRead);
   if (!Buf)
+  {
+    elog("(UnityCDB) config: could not read");
     return Out;
+  }
 
   auto Parsed = llvm::json::parse((*Buf)->getBuffer());
   if (!Parsed) {
@@ -289,7 +296,10 @@ UnityProjectCDB::loadConfig(PathRef SourceRoot) const {
   }
   const auto *Obj = Parsed->getAsObject();
   if (!Obj)
+  {
+    elog("(UnityCDB) config: not root object found");
     return Out;
+  }
 
   Out.Loaded = true;
   StringRef ConfigDir = llvm::sys::path::parent_path(PathToRead);
